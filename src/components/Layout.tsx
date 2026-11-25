@@ -12,6 +12,7 @@ import {
   LogOut,
   Megaphone,
   Menu,
+  MonitorPlay,
   Network,
   Package,
   Settings,
@@ -46,6 +47,7 @@ const NAV_GROUPS: Array<{
     title: '经营',
     items: [
       { to: '/', label: '运营概览', icon: LayoutDashboard, end: true },
+      { to: '/cockpit', label: '数据驾驶舱', icon: MonitorPlay, perm: 'orders.view' },
       { to: '/stores', label: '店铺管理', icon: StoreIcon, perm: 'stores.view' },
       { to: '/products', label: '商品管理', icon: Package, perm: 'products.view' },
     ],

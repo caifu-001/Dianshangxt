@@ -6,6 +6,7 @@ import {
   CalendarClock,
   CircleDollarSign,
   Megaphone,
+  MonitorPlay,
   Package,
   RefreshCw,
   ShoppingCart,
@@ -249,6 +250,11 @@ export default function Dashboard() {
         description={`${rangeValue.from} 至 ${rangeValue.to} · 全部店铺汇总`}
         actions={
           <>
+            <Link to="/cockpit">
+              <Button size="md" icon={<MonitorPlay className="w-3.5 h-3.5" />} title="投屏用的实时大屏">
+                数据驾驶舱
+              </Button>
+            </Link>
             <Segmented value={range} onChange={(v) => setRange(v as RangeKey)} options={RANGE_OPTIONS} />
             <Button size="md" icon={<RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />} onClick={reload}>
               刷新

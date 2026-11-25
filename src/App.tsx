@@ -7,6 +7,7 @@ import type { PermissionCode } from './lib/permissions'
 import AppLayout from './components/Layout'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
+import Cockpit from './pages/Cockpit'
 import Dashboard from './pages/Dashboard'
 import Stores from './pages/Stores'
 import Products from './pages/Products'
@@ -120,6 +121,16 @@ function AppRoutes() {
 
   return (
     <Routes>
+      {/* 数据驾驶舱是投屏用的大屏，不进工作台布局（没有侧边栏），
+          权限沿用订单查看：连订单都看不到的账号，看驾驶舱也没有意义 */}
+      <Route
+        path="cockpit"
+        element={
+          <RequirePermission perm="orders.view">
+            <Cockpit />
+          </RequirePermission>
+        }
+      />
       <Route element={<AppLayout />}>
         <Route index element={<Dashboard />} />
         <Route path="stores" element={<RequirePermission perm="stores.view"><Stores /></RequirePermission>} />

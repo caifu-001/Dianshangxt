@@ -133,3 +133,79 @@ body {
 body[data-perm-delete='false'] [data-perm='delete'] {
   display: none !important;
 }
+
+/* ---------------------------------------------------------------- */
+/*  数据驾驶舱：秒级动效（只在大屏使用，不影响后台页面）              */
+/* ---------------------------------------------------------------- */
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.28;
+  }
+}
+
+.live-dot {
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+.ticker-track {
+  width: max-content;
+  animation-name: ticker-scroll;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+
+.ticker-track:hover {
+  animation-play-state: paused;
+}
+
+.ticker-mask {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 16px, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 16px, #000 calc(100% - 24px), transparent);
+}
+
+/* 新进来的订单行闪一下，让「实时」这件事看得见 */
+@keyframes row-flash {
+  from {
+    background-color: rgba(34, 211, 238, 0.16);
+  }
+  to {
+    background-color: transparent;
+  }
+}
+
+.row-flash {
+  animation: row-flash 2.4s ease-out both;
+}
+
+@keyframes cockpit-scan {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .ticker-track,
+  .row-flash,
+  .cockpit-scan {
+    animation: none !important;
+  }
+}
