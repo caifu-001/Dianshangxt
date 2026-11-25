@@ -1477,6 +1477,75 @@ begin
 end;
 $$;
 
+-- 平台超管专用：列出所有成员及其所属公司（不受切换视角限制），用于成员归属调配。
+-- 普通账号 / 公司管理员看不到这个函数返回的跨公司数据。
+create or replace function public.platform_members()
+returns table (
+  id           uuid,
+  email        text,
+  full_name    text,
+  employee_no  text,
+  role         text,
+  status       text,
+  company_id   uuid,
+  company_name text,
+  created_at   timestamptz
+)
+language sql stable security definer set search_path = public
+as $$
+  select p.id, p.email, p.full_name, p.employee_no, p.role, p.status,
+         p.company_id, coalesce(c.name, '默认公司') as company_name, p.created_at
+    from public.profiles p
+    left join public.companies c on c.id = p.company_id
+   where public.is_super_admin()
+   order by p.company_id nulls last, p.created_at;
+$$;
+
+-- 平台超管专用：把多名成员批量移动到目标公司（可跨公司，不限于默认公司）。
+-- 不允许移动超管自身；目标公司必须存在且启用。
+create or replace function public.platform_move_members(p_members uuid[], p_company uuid)
+returns integer
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_target public.companies%rowtype;
+  v_moved  integer := 0;
+  v_item   uuid;
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以跨公司调配成员';
+  end if;
+
+  select * into v_target from public.companies where id = p_company;
+  if not found then
+    raise exception '目标公司不存在';
+  end if;
+  if v_target.status <> 'active' then
+    raise exception '目标公司已停用，不能接收成员';
+  end if;
+
+  if p_members is null or array_length(p_members, 1) is null then
+    return 0;
+  end if;
+
+  foreach v_item in array p_members loop
+    -- 跳过超管自身，避免把平台超管拖进某家公司破坏隔离
+    if v_item = auth.uid() then
+      continue;
+    end if;
+    update public.profiles
+       set company_id = p_company
+     where id = v_item
+       and coalesce(role, 'member') <> 'super_admin';
+    if found then
+      v_moved := v_moved + 1;
+    end if;
+  end loop;
+
+  return v_moved;
+end;
+$$;
+
 -- 部门可见范围：本部门 scope ∪ 上级部门 scope（inherit_parent 为 true 时逐级向上）
 -- 部门是「团队级」授权：信息中心配全模块，人力资源部配人事 / 绩效职能，
 -- 部门内所有成员自动获得，不用给每个人单独配角色。
@@ -3424,6 +3493,8 @@ grant execute on function public.create_company(text, text, text) to authenticat
 grant execute on function public.update_company(uuid, text, text, text, text) to authenticated;
 grant execute on function public.switch_company(uuid) to authenticated;
 grant execute on function public.assign_member_company(uuid, uuid) to authenticated;
+grant execute on function public.platform_members() to authenticated;
+grant execute on function public.platform_move_members(uuid[], uuid) to authenticated;
 
 -- 业务链路函数：函数内部各自校验权限，不能靠 grant 兜底
 grant execute on function public.sku_avg_cost(text)                          to authenticated;
