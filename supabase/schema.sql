@@ -1867,11 +1867,19 @@ create policy "access_req_update_staff" on public.access_requests
 -- ---------- 人员变动流水（employee_events） ----------
 drop policy if exists "emp_events_select" on public.employee_events;
 
--- 本人可见自己的轨迹，管理员可见全部；写入只发生在 security definer 函数里，
--- 所以不开放 insert / update / delete 策略，前端无法伪造审计记录
+-- 本人可见自己的轨迹，管理员 / HR 只可见本公司的轨迹；写入只发生在 security definer 函数里，
+-- 所以不开放 insert / update / delete 策略，前端无法伪造审计记录。
+-- 必须按 company_id 过滤：否则普通公司管理员能看到别的公司（甚至平台超管操作产生）的流水，
+-- 通过 actor_id 反查到超管档案，破坏「普通公司看不到超管」的隔离。
 create policy "emp_events_select" on public.employee_events
   for select to authenticated
-  using (profile_id = auth.uid() or public.has_permission('hr.view') or public.has_permission('account.manage'));
+  using (
+    profile_id = auth.uid()
+    or (
+      public.in_company(company_id)
+      and (public.has_permission('hr.view') or public.has_permission('account.manage'))
+    )
+  );
 
 -- ---------- 绩效（performance_reviews） ----------
 -- 本人看自己的；HR / 管理者看全部；录入与修改需要 performance.edit
@@ -1906,11 +1914,11 @@ declare
   etype text;
 begin
   if tg_op = 'INSERT' then
-    insert into public.employee_events (profile_id, event_type, summary, detail, actor_id)
+    insert into public.employee_events (profile_id, event_type, summary, detail, actor_id, company_id)
     values (
       new.id, 'hire', '账号档案创建',
       jsonb_build_object('role', new.role, 'employment_status', new.employment_status),
-      auth.uid()
+      auth.uid(), new.company_id
     );
     return new;
   end if;
@@ -1952,7 +1960,7 @@ begin
     else 'transfer'
   end;
 
-  insert into public.employee_events (profile_id, event_type, summary, detail, actor_id)
+  insert into public.employee_events (profile_id, event_type, summary, detail, actor_id, company_id)
   values (
     new.id, etype, array_to_string(parts, '；'),
     jsonb_build_object(
@@ -1963,7 +1971,7 @@ begin
       'position',    jsonb_build_array(old.position_id, new.position_id),
       'role_id',     jsonb_build_array(old.role_id, new.role_id)
     ),
-    auth.uid()
+    auth.uid(), new.company_id
   );
   return new;
 end;
@@ -2026,12 +2034,13 @@ begin
   end loop;
 
   select coalesce(full_name, email, '接手人') into to_name from public.profiles where id = p_to;
-  insert into public.employee_events (profile_id, event_type, summary, detail, actor_id)
+  insert into public.employee_events (profile_id, event_type, summary, detail, actor_id, company_id)
   values (
     p_from, 'transfer',
     '名下资源移交给 ' || to_name,
     jsonb_build_object('moved', moved, 'to', p_to),
-    auth.uid()
+    auth.uid(),
+    (select company_id from public.profiles where id = p_from)
   );
 
   return moved;
