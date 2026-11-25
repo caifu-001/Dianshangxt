@@ -13,6 +13,11 @@ import {
   Globe2,
   KeyRound,
   LayoutDashboard,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  GripVertical,
+  RotateCcw,
   ScrollText,
   LogOut,
   Megaphone,
@@ -106,12 +111,51 @@ const NAV_GROUPS: Array<{
   },
 ]
 
+/** 用户自定义导航顺序：分组标题序列 + 每个分组内的路由序列 */
+interface NavOrder {
+  groups: string[]
+  items: Record<string, string[]>
+}
+
+function defaultNavOrder(): NavOrder {
+  return {
+    groups: NAV_GROUPS.map((g) => g.title),
+    items: Object.fromEntries(NAV_GROUPS.map((g) => [g.title, g.items.map((i) => i.to)])),
+  }
+}
+
+/** 按用户偏好排序；偏好里缺失的新增分组 / 条目自动补到末尾，兼容版本升级 */
+function applyNavOrder(order: NavOrder | null): typeof NAV_GROUPS {
+  const base = defaultNavOrder()
+  const groups = order?.groups ?? []
+  const orderedGroups = [
+    ...groups.filter((t) => base.groups.includes(t)),
+    ...base.groups.filter((t) => !groups.includes(t)),
+  ]
+  return orderedGroups.map((title) => {
+    const src = NAV_GROUPS.find((g) => g.title === title)!
+    const saved = order?.items?.[title] ?? []
+    const items = [
+      ...saved.filter((to) => src.items.some((i) => i.to === to)),
+      ...src.items.filter((i) => !saved.includes(i.to)).map((i) => i.to),
+    ].map((to) => src.items.find((i) => i.to === to)!)
+    return { ...src, items }
+  })
+}
+
 export default function AppLayout() {
-  const { profile, user, signOut, schemaReady, role, isSuperAdmin, can, customRole, mustChangePassword, currentCompany } = useAuth()
+  const { profile, user, signOut, schemaReady, role, isSuperAdmin, can, customRole, mustChangePassword, currentCompany, updateSettings } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [pendingApprovals, setPendingApprovals] = useState(0)
+  const [sorting, setSorting] = useState(false)
+  const [sortSaving, setSortSaving] = useState(false)
+  const [sortError, setSortError] = useState('')
+  const [draftOrder, setDraftOrder] = useState<NavOrder | null>(null)
   const location = useLocation()
+
+  const savedOrder = (profile?.settings as Record<string, unknown> | undefined)?.navOrder as NavOrder | null | undefined
+  const navGroups = applyNavOrder(sorting ? draftOrder : savedOrder ?? null)
 
   useEffect(() => {
     setMobileOpen(false)
@@ -136,8 +180,63 @@ export default function AppLayout() {
 
   const displayName = profile?.full_name || user?.email?.split('@')[0] || '运营同学'
 
+  // 排序操作：只调整草稿快照，保存时才落库
+  function startSorting() {
+    setDraftOrder(sorting ? draftOrder : (savedOrder ?? defaultNavOrder()))
+    setSorting(!sorting)
+  }
+  // 与相邻「可见」项交换：跳过当前账号无权限看到的条目，避免隐藏项造成错位
+  function swapVisible<T>(full: T[], visibleSelf: T, dir: -1 | 1, isVisible: (v: T) => boolean): T[] {
+    const i = full.indexOf(visibleSelf)
+    if (i < 0) return full
+    let j = i + dir
+    while (j >= 0 && j < full.length && !isVisible(full[j])) j += dir
+    if (j < 0 || j >= full.length) return full
+    const next = [...full]
+    ;[next[i], next[j]] = [next[j], next[i]]
+    return next
+  }
+  function moveGroup(title: string, dir: -1 | 1) {
+    const cur = draftOrder ?? defaultNavOrder()
+    const visibleTitles = new Set(navGroups.map((g) => g.title))
+    setDraftOrder({ ...cur, groups: swapVisible(cur.groups, title, dir, (t) => visibleTitles.has(t)) })
+  }
+  function moveItem(groupTitle: string, to: string, dir: -1 | 1) {
+    const cur = draftOrder ?? defaultNavOrder()
+    const src = NAV_GROUPS.find((g) => g.title === groupTitle)
+    if (!src) return
+    const visibleRoutes = new Set(
+      src.items
+        .filter((item) => {
+          if (item.superOnly && !isSuperAdmin) return false
+          if (item.perms && item.perms.length > 0) return item.perms.some((code) => can(code))
+          return !item.perm || can(item.perm)
+        })
+        .map((i) => i.to),
+    )
+    const list = cur.items[groupTitle] ?? defaultNavOrder().items[groupTitle]
+    setDraftOrder({ ...cur, items: { ...cur.items, [groupTitle]: swapVisible(list, to, dir, (t) => visibleRoutes.has(t)) } })
+  }
+  async function saveSorting() {
+    setSortSaving(true)
+    setSortError('')
+    try {
+      await updateSettings({ navOrder: draftOrder ?? defaultNavOrder() })
+      setSorting(false)
+      setDraftOrder(null)
+    } catch (e) {
+      setSortError(e instanceof Error ? e.message : '保存失败，请重试')
+    } finally {
+      setSortSaving(false)
+    }
+  }
+  function resetSorting() {
+    setDraftOrder(defaultNavOrder())
+    setSortError('')
+  }
+
   // 菜单按权限码收敛：自定义角色看不到的模块，入口也不出现
-  const visibleGroups = NAV_GROUPS.map((group) => ({
+  const visibleGroups = navGroups.map((group) => ({
     ...group,
     items: group.items
       .filter((item) => {
@@ -155,46 +254,124 @@ export default function AppLayout() {
   const sidebar = (
     <div className="flex flex-col h-full">
       <div className="h-14 flex items-center gap-2.5 px-4 shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center shadow-sm shrink-0">
           <span className="text-white font-bold text-[13px] tracking-tight">DS</span>
         </div>
-        <div className="leading-tight">
-          <p className="text-[13.5px] font-semibold text-ink-900">电商运营中台</p>
+        <div className="leading-tight min-w-0 flex-1">
+          <p className="text-[13.5px] font-semibold text-ink-900 truncate">电商运营中台</p>
           <p className="text-[10px] text-ink-400 tracking-wide">AMAZON · TIKTOK SHOP</p>
         </div>
+        <button
+          onClick={startSorting}
+          title={sorting ? '退出排序' : '调整导航排序'}
+          className={cn(
+            'shrink-0 p-1.5 rounded-lg transition-colors',
+            sorting ? 'bg-brand-50 text-brand-600' : 'text-ink-400 hover:bg-ink-100 hover:text-ink-700',
+          )}
+        >
+          <GripVertical className="w-4 h-4" />
+        </button>
       </div>
 
+      {sorting && (
+        <div className="mx-2.5 mb-2 px-2 py-2 rounded-lg bg-brand-50/70 border border-brand-100">
+          <div className="flex items-center gap-1.5">
+            <p className="flex-1 text-[10.5px] leading-tight text-brand-700">用箭头调整顺序</p>
+            <button onClick={resetSorting} title="恢复默认" className="p-1 rounded text-ink-500 hover:bg-white">
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={saveSorting}
+              disabled={sortSaving}
+              title="保存排序"
+              className="p-1 rounded bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50"
+            >
+              <Check className="w-3.5 h-3.5" />
+            </button>
+            <button onClick={() => { setSorting(false); setDraftOrder(null); setSortError('') }} title="取消" className="p-1 rounded text-ink-500 hover:bg-white">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+          {sortError && <p className="mt-1 text-[10.5px] text-rose-600">{sortError}</p>}
+        </div>
+      )}
+
       <nav className="flex-1 overflow-y-auto px-2.5 pb-4 pt-1">
-        {visibleGroups.map((group) => (
+        {visibleGroups.map((group, gi) => (
           <div key={group.title} className="mb-3">
-            <p className="px-2.5 py-1.5 text-[10px] font-semibold text-ink-400 tracking-widest">{group.title.toUpperCase()}</p>
+            <div className="flex items-center gap-1 px-2.5 py-1.5">
+              <p className="flex-1 text-[10px] font-semibold text-ink-400 tracking-widest">{group.title.toUpperCase()}</p>
+              {sorting && (
+                <div className="flex items-center gap-0.5">
+                  <button
+                    onClick={() => moveGroup(group.title, -1)}
+                    disabled={gi === 0}
+                    title="上移分组"
+                    className="p-0.5 rounded text-ink-400 hover:bg-ink-100 hover:text-ink-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <ArrowUp className="w-3 h-3" />
+                  </button>
+                  <button
+                    onClick={() => moveGroup(group.title, 1)}
+                    disabled={gi === visibleGroups.length - 1}
+                    title="下移分组"
+                    className="p-0.5 rounded text-ink-400 hover:bg-ink-100 hover:text-ink-700 disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    <ArrowDown className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
             <div className="space-y-0.5">
-              {group.items.map((item) => (
-                <NavLink
-                  key={item.to}
-                  to={item.to}
-                  end={item.end}
-                  className={({ isActive }) =>
-                    cn(
-                      'group flex items-center gap-2.5 h-9 px-2.5 rounded-lg text-[13px] transition-colors',
-                      isActive
-                        ? 'bg-brand-50 text-brand-700 font-medium'
-                        : 'text-ink-600 hover:bg-ink-100/70 hover:text-ink-900',
-                    )
-                  }
-                >
-                  {({ isActive }) => (
-                    <>
-                      <item.icon className={cn('w-4 h-4 shrink-0', isActive ? 'text-brand-600' : 'text-ink-400 group-hover:text-ink-600')} />
-                      <span className="flex-1 truncate">{item.label}</span>
-                      {item.badge && (
-                        <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-ink-900 text-white tracking-wide">
-                          {item.badge}
-                        </span>
-                      )}
-                    </>
+              {group.items.map((item, ii) => (
+                <div key={item.to} className="flex items-center gap-0.5">
+                  <NavLink
+                    to={item.to}
+                    end={item.end}
+                    onClick={(e) => { if (sorting) e.preventDefault() }}
+                    className={({ isActive }) =>
+                      cn(
+                        'group flex items-center gap-2.5 h-9 px-2.5 rounded-lg text-[13px] transition-colors min-w-0 flex-1',
+                        isActive && !sorting
+                          ? 'bg-brand-50 text-brand-700 font-medium'
+                          : 'text-ink-600 hover:bg-ink-100/70 hover:text-ink-900',
+                        sorting && 'bg-ink-50/60',
+                      )
+                    }
+                  >
+                    {({ isActive }) => (
+                      <>
+                        <item.icon className={cn('w-4 h-4 shrink-0', isActive && !sorting ? 'text-brand-600' : 'text-ink-400 group-hover:text-ink-600')} />
+                        <span className="flex-1 truncate">{item.label}</span>
+                        {item.badge && (
+                          <span className="text-[9px] font-semibold px-1 py-0.5 rounded bg-ink-900 text-white tracking-wide">
+                            {item.badge}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </NavLink>
+                  {sorting && (
+                    <div className="flex flex-col shrink-0">
+                      <button
+                        onClick={() => moveItem(group.title, item.to, -1)}
+                        disabled={ii === 0}
+                        title="上移"
+                        className="p-0.5 rounded text-ink-400 hover:bg-ink-100 hover:text-ink-700 disabled:opacity-30 disabled:cursor-not-allowed leading-none"
+                      >
+                        <ArrowUp className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={() => moveItem(group.title, item.to, 1)}
+                        disabled={ii === group.items.length - 1}
+                        title="下移"
+                        className="p-0.5 rounded text-ink-400 hover:bg-ink-100 hover:text-ink-700 disabled:opacity-30 disabled:cursor-not-allowed leading-none"
+                      >
+                        <ArrowDown className="w-3 h-3" />
+                      </button>
+                    </div>
                   )}
-                </NavLink>
+                </div>
               ))}
             </div>
           </div>

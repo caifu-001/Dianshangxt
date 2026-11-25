@@ -57,6 +57,8 @@ interface AuthContextValue {
   changePassword: (current: string, next: string) => Promise<void>
   signOut: () => Promise<void>
   refreshProfile: () => Promise<void>
+  /** 局部合并当前用户 settings（不覆盖其他键），如导航排序偏好 */
+  updateSettings: (patch: Record<string, unknown>) => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -294,6 +296,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [loadProfile, loadRoles, session?.user])
 
+  const updateSettings = useCallback(async (patch: Record<string, unknown>) => {
+    if (!profile) throw new Error('登录状态已失效，请重新登录')
+    const current = (profile.settings ?? {}) as Record<string, unknown>
+    const next = { ...current, ...patch }
+    const { error } = await supabase
+      .from('profiles')
+      .update({ settings: next })
+      .eq('id', profile.id)
+    if (error) throw new Error(error.message)
+    setProfile((prev) => (prev ? { ...prev, settings: next } : prev))
+  }, [profile])
+
   const role: Role = normalizeRole(profile?.role)
   const customRole = useMemo(
     () => (profile?.role_id ? roles.find((r) => r.id === profile.role_id) ?? null : null),
@@ -343,10 +357,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       changePassword,
       signOut,
       refreshProfile,
+      updateSettings,
     }
   }, [
     session, profile, currentCompany, role, permissions, customRole, deptPermissions, loading, schemaReady, schemaMessage, blocked,
-    recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile,
+    recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile, updateSettings,
   ])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
