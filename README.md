@@ -4,6 +4,11 @@
 
 > 技术栈：React 18 + TypeScript + Vite + TailwindCSS + Recharts + Supabase (PostgreSQL)
 
+**🌐 线上地址：<https://caifu-001.github.io/Dianshangxt/>**
+
+前端由 GitHub Pages 托管（push `main` 自动构建发布），数据存放在 Supabase 云端。
+首次使用前，需要在该 Supabase 项目的 SQL Editor 执行一次 `supabase/schema.sql` 建表。
+
 ![运营概览](docs/preview-dashboard.png)
 
 <details>
@@ -42,7 +47,7 @@ npm run dev      # http://127.0.0.1:5173
 
 ## 首次使用：初始化数据库（必做）
 
-1. 打开 Supabase 控制台 → 你的项目 → **SQL Editor** → New query
+1. 打开 <https://supabase.com/dashboard/project/rjdoimnicmibxfwcjchn/sql/new>（SQL Editor → New query）
 2. 复制 `supabase/schema.sql` 的全部内容，粘贴并 **Run**
 3. 回到应用登录 / 注册，系统会自动检测并进入工作台
 4. （可选）在「数据源」或「系统设置」中点击 **生成演示数据**，立刻看到完整报表
@@ -111,8 +116,15 @@ npm run preview    # 预览构建产物
 
 ## 部署
 
-`dist/` 为纯静态产物，可部署到 Vercel / Netlify / Cloudflare Pages 等任意静态托管。
-注意为 SPA 配置 history fallback（所有路径回退到 `index.html`）。
+当前线上版本跑在 **GitHub Pages**：<https://caifu-001.github.io/Dianshangxt/>
+
+- 推送 `main` 触发 `.github/workflows/deploy.yml`：`npm install` → 类型检查 → 构建 → 发布
+- 构建产物的资源前缀由 `vite.config.ts` 的 `base` 控制，生产模式固定为 `/Dianshangxt/`
+- 构建后自动把 `index.html` 复制成 `404.html`，用于兜住 SPA 子路由刷新（Pages 无服务端 rewrite）
+- 仓库改名或绑定自定义域名时，在 `.env` 里设置 `VITE_BASE_PATH=/` 即可（此时 basename 也会自动变）
+
+也可以部署到 Vercel / Netlify / Cloudflare Pages 等任意静态托管，
+此时把 `VITE_BASE_PATH` 设为 `/`，并配置 history fallback（所有路径回退到 `index.html`）。
 
 ## 目录结构
 
