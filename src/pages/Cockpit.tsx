@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import dayjs from 'dayjs'
+import { useAuth } from '../context/AuthContext'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -100,6 +101,7 @@ function agoText(iso: string) {
 }
 
 export default function Cockpit() {
+  const { isSuperAdmin } = useAuth()
   const fx = useFx()
   const clock = useClock()
   const rootRef = useRef<HTMLDivElement>(null)
@@ -1000,7 +1002,7 @@ export default function Cockpit() {
             <footer className="mt-auto shrink-0 flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 pb-2 text-[10px] text-slate-600">
               <span className="flex items-center gap-1.5">
                 <span className="w-1 h-1 rounded-full bg-emerald-400" />
-                数据源 Supabase · 每 {intervalMs ? `${intervalMs / 1000}` : '—'} 秒自动刷新
+                {isSuperAdmin && '数据源 Supabase · '}每 {intervalMs ? `${intervalMs / 1000}` : '—'} 秒自动刷新
               </span>
               <span>最后更新 {lastUpdated ? dayjs(lastUpdated).format('HH:mm:ss') : '—'}</span>
               <span className="hidden sm:inline">金额统一折算 USD，汇率可在系统设置调整</span>

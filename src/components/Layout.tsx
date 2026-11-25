@@ -200,19 +200,21 @@ export default function AppLayout() {
       </nav>
 
       <div className="px-2.5 pb-3 shrink-0 space-y-0.5">
-        <NavLink
-          to="/setup"
-          className={({ isActive }) =>
-            cn(
-              'flex items-center gap-2.5 h-9 px-2.5 rounded-lg text-[13px] transition-colors',
-              isActive ? 'bg-brand-50 text-brand-700 font-medium' : 'text-ink-600 hover:bg-ink-100/70 hover:text-ink-900',
-            )
-          }
-        >
-          <Database className="w-4 h-4 text-ink-400" />
-          <span className="flex-1">数据源</span>
-          <span className={cn('w-1.5 h-1.5 rounded-full', schemaReady ? 'bg-emerald-500' : 'bg-amber-500')} />
-        </NavLink>
+        {isSuperAdmin && (
+          <NavLink
+            to="/setup"
+            className={({ isActive }) =>
+              cn(
+                'flex items-center gap-2.5 h-9 px-2.5 rounded-lg text-[13px] transition-colors',
+                isActive ? 'bg-brand-50 text-brand-700 font-medium' : 'text-ink-600 hover:bg-ink-100/70 hover:text-ink-900',
+              )
+            }
+          >
+            <Database className="w-4 h-4 text-ink-400" />
+            <span className="flex-1">数据源</span>
+            <span className={cn('w-1.5 h-1.5 rounded-full', schemaReady ? 'bg-emerald-500' : 'bg-amber-500')} />
+          </NavLink>
+        )}
         <NavLink
           to="/settings"
           className={({ isActive }) =>
@@ -286,10 +288,12 @@ export default function AppLayout() {
               <Menu className="w-5 h-5" />
             </button>
 
-            <div className="flex items-center gap-2 text-[11px] text-ink-400">
-              <span className={cn('w-1.5 h-1.5 rounded-full', schemaReady ? 'bg-emerald-500' : 'bg-amber-500')} />
-              <span className="hidden sm:inline">{schemaReady ? 'Supabase 数据已连接' : '数据库待初始化'}</span>
-            </div>
+            {isSuperAdmin && (
+              <div className="flex items-center gap-2 text-[11px] text-ink-400">
+                <span className={cn('w-1.5 h-1.5 rounded-full', schemaReady ? 'bg-emerald-500' : 'bg-amber-500')} />
+                <span className="hidden sm:inline">{schemaReady ? 'Supabase 数据已连接' : '数据库待初始化'}</span>
+              </div>
+            )}
 
             <div className="ml-auto flex items-center gap-2">
               {currentCompany && (
@@ -361,7 +365,7 @@ export default function AppLayout() {
               <p className="text-[11.5px] leading-relaxed text-amber-800">
                 数据库还没升级到组织架构版本，部门 / 岗位 / 自定义角色暂不可用（当前按系统角色默认权限运行）。
                 请到 <Link to="/setup" className="underline font-medium">数据源</Link> 页复制最新脚本，
-                在 Supabase SQL Editor 重新执行一次即可启用。
+                在 SQL Editor 重新执行一次即可启用。
               </p>
             </div>
           </div>

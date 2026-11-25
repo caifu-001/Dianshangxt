@@ -604,6 +604,7 @@ export default function Settings() {
         </div>
       </div>
 
+      {isSuperAdmin && (
       <div className="card mt-3 overflow-hidden">
         <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
           <Database className="w-4 h-4 text-ink-400" />
@@ -651,6 +652,7 @@ export default function Settings() {
           </div>
         </div>
       </div>
+      )}
 
       <div className="card mt-3 overflow-hidden">
         <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
@@ -674,7 +676,7 @@ export default function Settings() {
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-ink-800">导出初始化脚本</p>
               <p className="mt-0.5 text-[11.5px] text-ink-500 leading-relaxed">
-                下载 schema.sql，可在新的 Supabase 项目中复用同一套表结构。
+                下载 schema.sql，可在新项目中复用同一套表结构。
               </p>
             </div>
             <Button size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={() => downloadTextFile('schema.sql', schemaSql, 'text/plain;charset=utf-8')}>
@@ -706,14 +708,18 @@ export default function Settings() {
             <Building2 className="w-3.5 h-3.5 text-ink-300" />
             电商运营中台 v1.0 · Amazon & TikTok Shop
           </p>
-          <p className="flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-ink-300" />
-            React + Vite + Supabase（RLS 行级隔离）
-          </p>
+          {isSuperAdmin && (
+            <p className="flex items-center gap-1.5">
+              <ShieldCheck className="w-3.5 h-3.5 text-ink-300" />
+              React + Vite + Supabase（RLS 行级隔离）
+            </p>
+          )}
         </div>
-        <p className="mt-2 text-[11px] text-ink-400 leading-relaxed">
-          所有数据通过 Supabase 公开密钥访问，受行级权限策略保护：每个账号只能读写自己的数据。切勿在前端使用 service_role 密钥。
-        </p>
+        {isSuperAdmin && (
+          <p className="mt-2 text-[11px] text-ink-400 leading-relaxed">
+            所有数据通过 Supabase 公开密钥访问，受行级权限策略保护：每个账号只能读写自己的数据。切勿在前端使用 service_role 密钥。
+          </p>
+        )}
       </div>
 
       <ConfirmDialog

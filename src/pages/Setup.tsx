@@ -16,7 +16,7 @@ const STEPS = [
 const RELOAD_SQL = 'NOTIFY pgrst, \'reload schema\';'
 
 export default function Setup() {
-  const { schemaReady, schemaMessage, recheckSchema } = useAuth()
+  const { schemaReady, schemaMessage, recheckSchema, isSuperAdmin } = useAuth()
   const { push } = useToast()
   const [copied, setCopied] = useState(false)
   const [reloadCopied, setReloadCopied] = useState(false)
@@ -59,6 +59,17 @@ export default function Setup() {
     } finally {
       setSeeding(false)
     }
+  }
+
+  if (!isSuperAdmin) {
+    return (
+      <div className="max-w-3xl mx-auto">
+        <PageHeader title="数据源" description="平台级配置" />
+        <div className="card p-6 text-[13px] text-ink-600 leading-relaxed">
+          数据源配置仅平台超级管理员可访问。普通账号无需执行建表脚本，如需协助请联系管理员。
+        </div>
+      </div>
+    )
   }
 
   return (
