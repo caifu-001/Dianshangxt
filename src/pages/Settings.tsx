@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Building2,
@@ -10,6 +10,7 @@ import {
   ExternalLink,
   Info,
   Loader2,
+  RefreshCw,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -20,7 +21,18 @@ import { useAuth } from '../context/AuthContext'
 import { deleteAllRows, fetchRows, updateRow } from '../lib/db'
 import { PROJECT_REF, SQL_EDITOR_URL, SUPABASE_URL } from '../lib/supabase'
 import { seedDemoData } from '../lib/seed'
-import { FX_DEFAULTS, FX_EDITABLE, resolveRates } from '../lib/fx'
+import {
+  DEFAULT_FX_CODES,
+  FX_CATALOG,
+  FX_DEFAULTS,
+  fetchLatestFxRates,
+  fxLabel,
+  pickCatalogRates,
+  resolveFxCodes,
+  resolveFxMeta,
+  resolveRates,
+  type FxMeta,
+} from '../lib/fx'
 import { Badge, Button, ConfirmDialog, Field, PageHeader, useToast } from '../components/ui'
 import { PASSWORD_TONE_CLASS, checkPassword } from '../lib/password'
 import { cn, downloadTextFile, fmtDateTime } from '../lib/utils'
@@ -72,6 +84,14 @@ export default function Settings() {
   const [savingProfile, setSavingProfile] = useState(false)
   const [rates, setRates] = useState<Record<string, string>>({})
   const [savingRates, setSavingRates] = useState(false)
+  const [fxCodes, setFxCodes] = useState<string[]>(DEFAULT_FX_CODES)
+  const [fxMeta, setFxMeta] = useState<FxMeta | null>(null)
+  const [updatingFx, setUpdatingFx] = useState(false)
+  const [showCodePicker, setShowCodePicker] = useState(false)
+  const [selectedCodes, setSelectedCodes] = useState<string[]>(DEFAULT_FX_CODES)
+  const [codeQuery, setCodeQuery] = useState('')
+  const [catalogCodes, setCatalogCodes] = useState<string[]>([])
+  const autoFxDone = useRef(false)
   const [copied, setCopied] = useState(false)
   const [seeding, setSeeding] = useState(false)
   const [clearOpen, setClearOpen] = useState(false)
@@ -90,11 +110,24 @@ export default function Settings() {
   }, [profile])
 
   useEffect(() => {
+    const codes = resolveFxCodes(profile?.settings)
     const resolved = resolveRates(profile?.settings)
     const next: Record<string, string> = {}
-    for (const code of FX_EDITABLE) next[code] = String(resolved[code] ?? '')
+    for (const code of codes) next[code] = String(resolved[code] ?? '')
     setRates(next)
+    setFxCodes(codes)
+    setSelectedCodes(codes)
+    setFxMeta(resolveFxMeta(profile?.settings))
   }, [profile])
+
+  // 距上次联网更新超过 24 小时则在后台静默拉一次；失败不打扰用户
+  useEffect(() => {
+    if (!canManageSystem || !user || autoFxDone.current) return
+    const meta = resolveFxMeta(profile?.settings)
+    if (meta?.updated_at && Date.now() - new Date(meta.updated_at).getTime() < 24 * 60 * 60 * 1000) return
+    autoFxDone.current = true
+    void handleFetchFx(true)
+  }, [canManageSystem, user, profile?.settings])
 
   useEffect(() => {
     if (!schemaReady) return
@@ -164,22 +197,95 @@ export default function Settings() {
     }
   }
 
-  async function saveRates() {
-    if (!user) return
-    setSavingRates(true)
+  /** 统一写入汇率 / 币种清单 / 更新来源；quiet 用于后台静默更新 */
+  async function persistFx(
+    nextRates: Record<string, string>,
+    nextCodes: string[],
+    meta: FxMeta | null,
+    quiet = false,
+  ): Promise<boolean> {
+    if (!user) return false
+    const fx: Record<string, number> = {}
+    for (const [code, value] of Object.entries(nextRates)) {
+      const rate = Number(value)
+      if (Number.isFinite(rate) && rate > 0) fx[code] = rate
+    }
     try {
-      const fx: Record<string, number> = {}
-      for (const [code, value] of Object.entries(rates)) {
-        const rate = Number(value)
-        if (Number.isFinite(rate) && rate > 0) fx[code] = rate
-      }
       await updateRow<Profile>('profiles', user.id, {
-        settings: { ...(profile?.settings ?? {}), fx },
+        settings: {
+          ...(profile?.settings ?? {}),
+          fx,
+          fx_codes: nextCodes,
+          fx_meta: meta ?? null,
+        },
       })
       await refreshProfile()
-      push('汇率已保存，报表将按新汇率折算')
+      if (!quiet) push('汇率已保存，报表将按新汇率折算')
+      return true
     } catch (err) {
-      push(err instanceof Error ? err.message : '保存失败', 'error')
+      if (!quiet) push(err instanceof Error ? err.message : '保存失败', 'error')
+      return false
+    }
+  }
+
+  async function saveRates() {
+    setSavingRates(true)
+    try {
+      await persistFx(rates, fxCodes, fxMeta)
+    } finally {
+      setSavingRates(false)
+    }
+  }
+
+  /** 联网拉取：依次尝试多个免费源，成功后直接保存并刷新全局汇率 */
+  async function handleFetchFx(quiet = false) {
+    if (!user) return
+    setUpdatingFx(true)
+    try {
+      const quote = await fetchLatestFxRates()
+      const picked = pickCatalogRates(quote.rates)
+      if (picked.codes.length < 5) throw new Error('有效币种过少')
+      const nextCodes = Array.from(new Set(['USD', ...picked.codes]))
+      const resolved = { ...FX_DEFAULTS, ...quote.rates }
+      const nextRates: Record<string, string> = {}
+      for (const code of nextCodes) nextRates[code] = String(resolved[code] ?? '')
+      const meta: FxMeta = {
+        updated_at: quote.fetchedAt,
+        source: quote.source,
+        market_date: quote.marketDate,
+      }
+      const ok = await persistFx(nextRates, nextCodes, meta, quiet)
+      if (!ok) return
+      setCatalogCodes(nextCodes)
+      setFxCodes(nextCodes)
+      setSelectedCodes(nextCodes)
+      setRates(nextRates)
+      setFxMeta(meta)
+      if (!quiet) push(`已联网更新 ${nextCodes.length} 个币种汇率（${quote.source}）`)
+    } catch (err) {
+      if (!quiet) push(err instanceof Error ? err.message : '联网更新失败，原有汇率未改动', 'error')
+    } finally {
+      setUpdatingFx(false)
+    }
+  }
+
+  /** 应用勾选的币种到设置页与全部业务下拉 */
+  async function applyFxCodes() {
+    if (selectedCodes.length === 0) {
+      push('至少保留一个币种', 'error')
+      return
+    }
+    const codes = Array.from(new Set(['USD', ...selectedCodes]))
+    const resolved = resolveRates(profile?.settings)
+    const nextRates: Record<string, string> = {}
+    for (const code of codes) nextRates[code] = String(resolved[code] ?? FX_DEFAULTS[code] ?? '')
+    setSavingRates(true)
+    try {
+      const ok = await persistFx(nextRates, codes, fxMeta)
+      if (!ok) return
+      setFxCodes(codes)
+      setRates(nextRates)
+      setShowCodePicker(false)
     } finally {
       setSavingRates(false)
     }
@@ -343,21 +449,41 @@ export default function Settings() {
       </div>
 
       <div className="card mt-3 overflow-hidden">
-        <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
+        <div className="px-4 py-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
           <Calculator className="w-4 h-4 text-ink-400" />
           <h3 className="text-[13.5px] font-semibold text-ink-900">汇率与币种</h3>
           <span className="text-[11px] text-ink-400">用于多店铺报表折算，1 USD = ?</span>
+          <div className="ml-auto flex items-center gap-2">
+            {fxMeta && (
+              <span
+                className="text-[10.5px] text-ink-400 num"
+                title={fxMeta.market_date ? `行情日期 ${fxMeta.market_date}` : undefined}
+              >
+                {fmtDateTime(fxMeta.updated_at)} · {fxMeta.source}
+              </span>
+            )}
+            <Button
+              size="sm"
+              icon={<RefreshCw className="w-3.5 h-3.5" />}
+              onClick={() => void handleFetchFx()}
+              loading={updatingFx}
+              disabled={!canManageSystem}
+            >
+              联网更新
+            </Button>
+          </div>
         </div>
         <div className="p-4">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-            {FX_EDITABLE.map((code) => (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2.5">
+            {fxCodes.map((code) => (
               <div key={code}>
-                <label className="label">{code}</label>
+                <label className="label">{fxLabel(code)}</label>
                 <input
                   className="input num"
                   type="number"
                   step="0.0001"
                   value={rates[code] ?? ''}
+                  disabled={!canManageSystem}
                   onChange={(e) => setRates((r) => ({ ...r, [code]: e.target.value }))}
                 />
               </div>
@@ -369,16 +495,70 @@ export default function Settings() {
             </Button>
             <Button
               size="sm"
+              disabled={!canManageSystem}
               onClick={() => {
                 const next: Record<string, string> = {}
-                for (const code of FX_EDITABLE) next[code] = String(FX_DEFAULTS[code])
+                for (const code of fxCodes) next[code] = String(FX_DEFAULTS[code] ?? '')
                 setRates(next)
+                setFxMeta(null)
               }}
             >
               恢复默认
             </Button>
-            <span className="text-[11px] text-ink-400">报表统一以 USD 为基准折算，可按当期实际结汇价调整</span>
+            <Button size="sm" disabled={!canManageSystem} onClick={() => setShowCodePicker((v) => !v)}>
+              管理币种
+            </Button>
+            <span className="text-[11px] text-ink-400">
+              公开汇率源每日更新，超过 24 小时自动同步；也可按实际结汇价手改后保存
+            </span>
           </div>
+
+          {showCodePicker && (
+            <div className="mt-3 rounded-lg border border-ink-200 bg-ink-50/40 p-3 space-y-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className="input !h-8 !w-52"
+                  placeholder="搜索代码或名称"
+                  value={codeQuery}
+                  onChange={(e) => setCodeQuery(e.target.value)}
+                />
+                <span className="text-[11px] text-ink-400">已选 {selectedCodes.length} 个 · 修改后点「应用币种」</span>
+              </div>
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5 max-h-56 overflow-y-auto pr-1">
+                {Array.from(new Set([...Object.keys(FX_CATALOG), ...catalogCodes, ...fxCodes]))
+                  .filter((code) => {
+                    const q = codeQuery.trim().toLowerCase()
+                    return !q || code.toLowerCase().includes(q) || fxLabel(code).toLowerCase().includes(q)
+                  })
+                  .map((code) => (
+                    <label
+                      key={code}
+                      className="flex items-center gap-1.5 rounded-md border border-ink-200 bg-white px-2 py-1.5 text-[11px] text-ink-700 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        className="accent-brand-600"
+                        checked={selectedCodes.includes(code)}
+                        onChange={(e) =>
+                          setSelectedCodes((prev) =>
+                            e.target.checked
+                              ? Array.from(new Set([...prev, code]))
+                              : prev.filter((c) => c !== code),
+                          )
+                        }
+                      />
+                      <span className="truncate">{fxLabel(code)}</span>
+                    </label>
+                  ))}
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="primary" onClick={applyFxCodes} loading={savingRates}>
+                  应用币种
+                </Button>
+                <Button size="sm" onClick={() => setShowCodePicker(false)}>收起</Button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

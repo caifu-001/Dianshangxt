@@ -23,6 +23,7 @@ import { callRpc, deleteRow, deleteWhere, fetchRows, insertRows, updateRow } fro
 import { useAsync } from '../hooks/useAsync'
 import { useAuth } from '../context/AuthContext'
 import { cn, downloadTextFile, fmtDate, money, num, pct, toCsv, today } from '../lib/utils'
+import { fxLabel, useFxCodes } from '../lib/fx'
 import {
   EXPENSE_APPROVAL_ACTION_META,
   EXPENSE_CATEGORY_META,
@@ -157,6 +158,7 @@ const emptyBudget = (): BudgetForm => ({
 
 export default function Expenses() {
   const { push } = useToast()
+  const fxCodes = useFxCodes()
   const { user, can } = useAuth()
   const canEdit = can('expense.edit')
   const canAudit = can('finance.audit')
@@ -1042,7 +1044,7 @@ export default function Expenses() {
               </Field>
               <Field label="币种">
                 <Select value={form.currency} onChange={(v) => setForm({ ...form, currency: v })}
-                  options={['CNY', 'USD', 'GBP', 'EUR', 'JPY'].map((c) => ({ value: c, label: c }))} />
+                  options={fxCodes.map((c) => ({ value: c, label: fxLabel(c) }))} />
               </Field>
             </div>
 
@@ -1199,7 +1201,7 @@ export default function Expenses() {
             <Field label="预算金额"><input className="input num" type="number" min="0" step="0.01" value={budgetForm.amount} onChange={(e) => setBudgetForm({ ...budgetForm, amount: e.target.value })} /></Field>
             <Field label="币种">
               <Select value={budgetForm.currency} onChange={(v) => setBudgetForm({ ...budgetForm, currency: v })}
-                options={['CNY', 'USD', 'GBP', 'EUR'].map((c) => ({ value: c, label: c }))} />
+                options={fxCodes.map((c) => ({ value: c, label: fxLabel(c) }))} />
             </Field>
             <Field label="备注"><input className="input" value={budgetForm.note} onChange={(e) => setBudgetForm({ ...budgetForm, note: e.target.value })} /></Field>
           </div>

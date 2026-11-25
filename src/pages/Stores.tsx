@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Archive, MoreHorizontal, Pencil, Plus, Store as StoreIcon, Target, Trash2 } from 'lucide-react'
 import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
-import { CURRENCIES, MARKETPLACES, PLATFORM_LABEL, STORE_STATUS, marketplaceMeta } from '../lib/constants'
+import { MARKETPLACES, PLATFORM_LABEL, STORE_STATUS, marketplaceMeta } from '../lib/constants'
+import { fxLabel, useFxCodes } from '../lib/fx'
 import type { Campaign, Order, Platform, Product, Store } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
@@ -43,6 +44,7 @@ const EMPTY: FormState = {
 
 export default function Stores() {
   const { push } = useToast()
+  const fxCodes = useFxCodes()
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Store | null>(null)
   const [form, setForm] = useState<FormState>(EMPTY)
@@ -338,7 +340,7 @@ export default function Stores() {
             />
           </Field>
           <Field label="结算币种">
-            <Select value={form.currency} onChange={(v) => setForm({ ...form, currency: v })} options={CURRENCIES.map((c) => ({ value: c, label: c }))} />
+            <Select value={form.currency} onChange={(v) => setForm({ ...form, currency: v })} options={fxCodes.map((c) => ({ value: c, label: fxLabel(c) }))} />
           </Field>
           <Field label="Seller / Shop ID">
             <input className="input" value={form.seller_id} onChange={(e) => setForm({ ...form, seller_id: e.target.value })} placeholder="选填，用于对账" />

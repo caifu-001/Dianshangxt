@@ -46,7 +46,7 @@ import type {
   Supplier,
 } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
-import { convert, useFx } from '../lib/fx'
+import { convert, fxLabel, useFx, useFxCodes } from '../lib/fx'
 import {
   Badge,
   Button,
@@ -160,8 +160,6 @@ const EMPTY_SUPPLIER: SupplierDraft = {
   note: '',
 }
 
-const CURRENCY_OPTIONS = ['CNY', 'USD', 'GBP', 'EUR', 'JPY']
-
 /** 通讯录（team_directory）：采购员与付款人下拉用 */
 interface DirectoryRow {
   id: string
@@ -177,6 +175,7 @@ export default function Procurement() {
   const canBuy = can('purchase.edit')
   const canAudit = can('finance.audit')
   const fx = useFx()
+  const fxCodes = useFxCodes()
 
   const [tab, setTab] = useState<Tab>('orders')
   const [search, setSearch] = useState('')
@@ -1726,7 +1725,7 @@ export default function Procurement() {
             <Select
               value={poDraft.currency}
               onChange={(v) => setPoDraft({ ...poDraft, currency: v })}
-              options={CURRENCY_OPTIONS.map((c) => ({ value: c, label: c }))}
+              options={fxCodes.map((c) => ({ value: c, label: fxLabel(c) }))}
             />
           </Field>
           <Field label="状态">
