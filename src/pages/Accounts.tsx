@@ -355,10 +355,23 @@ export default function Accounts() {
 
   /* ---------------- 新建账号 ---------------- */
 
-  function openCreate() {
+  /** 按公司内已用工号顺延推荐；离职工号封存不复用。旧库未升级时静默跳过，仍可手工填号 */
+  async function fillRecommendedNo() {
+    try {
+      const no = await callRpc<string>('recommend_employee_no')
+      if (typeof no === 'string' && no.trim()) {
+        setCreateForm((f) => ({ ...f, employee_no: no.trim() }))
+      }
+    } catch {
+      // 数据库还没升级时保持现状，不阻断建号
+    }
+  }
+
+  async function openCreate() {
     setCreateForm(emptyCreateForm(roleOptions[roleOptions.length - 1] ?? 'member'))
     setCreated(null)
     setCreateOpen(true)
+    await fillRecommendedNo()
   }
 
   async function submitCreate() {
@@ -926,13 +939,23 @@ export default function Accounts() {
                   onChange={(e) => setCreateForm({ ...createForm, email: e.target.value })}
                 />
               </Field>
-              <Field label="员工工号" hint="全公司唯一，可留空">
-                <input
-                  className="input num"
-                  value={createForm.employee_no}
-                  placeholder="如 E1024"
-                  onChange={(e) => setCreateForm({ ...createForm, employee_no: e.target.value })}
-                />
+              <Field label="员工工号" hint="按公司现有工号顺延推荐；离职工号封存保留，不会重复分配">
+                <div className="flex gap-1.5">
+                  <input
+                    className="input num flex-1 min-w-0"
+                    value={createForm.employee_no}
+                    placeholder="如 E1024"
+                    onChange={(e) => setCreateForm({ ...createForm, employee_no: e.target.value })}
+                  />
+                  <Button
+                    size="sm"
+                    className="!h-9"
+                    title="重新获取推荐工号"
+                    onClick={() => void fillRecommendedNo()}
+                  >
+                    推荐
+                  </Button>
+                </div>
               </Field>
               <Field label="联系电话">
                 <input
@@ -1199,6 +1222,7 @@ export default function Accounts() {
               <p className="text-[11.5px] leading-relaxed text-amber-800">
                 确认后该成员<strong>立即失去登录权限</strong>，部门 / 岗位 / 岗位角色被清空，系统角色降为普通人员。
                 名下资源会转给接手人；不选接手人则保留原归属，作为团队公共数据。
+                员工工号随档案封存保留，不会分配给新入职成员。
               </p>
             </div>
 

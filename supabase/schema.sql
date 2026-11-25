@@ -1319,6 +1319,45 @@ as $$
    order by p.created_at;
 $$;
 
+-- ---------- 工号推荐：按公司内已用编号顺延，离职工号封存不复用 ----------
+create or replace function public.recommend_employee_no()
+returns text
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_max integer;
+  v_no  text;
+begin
+  if not (public.is_staff() or public.has_permission('hr.manage')) then
+    raise exception '只有管理员或人力岗可以获取推荐工号';
+  end if;
+
+  -- 离职工号保留在原档案里（封存），这里不按 employment_status 过滤：
+  -- 推荐号永远向后顺延，不会把离职号重新分配给新人。
+  select coalesce(max(substring(employee_no from '^[Ee]([0-9]{4,6})$')::integer), 1000)
+    into v_max
+    from public.profiles
+   where public.in_company(company_id)
+     and employee_no ~* '^E[0-9]{4,6}$';
+
+  loop
+    v_max := v_max + 1;
+    v_no  := 'E' || lpad(v_max::text, 4, '0');
+    exit when not exists (
+      select 1
+        from public.profiles
+       where public.in_company(company_id)
+         and lower(btrim(employee_no)) = lower(v_no)
+    );
+  end loop;
+
+  return v_no;
+end;
+$$;
+
 create or replace function public.is_staff()
 returns boolean
 language sql stable security definer set search_path = public
@@ -3372,6 +3411,7 @@ grant execute on function public.decide_access_request(uuid, boolean, text) to a
 grant execute on function public.has_permission(text) to authenticated;
 grant execute on function public.dept_scope(uuid) to authenticated;
 grant execute on function public.team_directory() to authenticated;
+grant execute on function public.recommend_employee_no() to authenticated;
 
 -- 多租户：公司表本身不开放直读（无 RLS），一切通过下面的函数并按超管 / 管理员身份校验
 grant execute on function public.current_company_id() to authenticated;
