@@ -1,3 +1,4 @@
+import dayjs from 'dayjs'
 import { fetchRows, insertRow, insertRows, updateRow } from './db'
 import { supabase } from './supabase'
 import { daysAgo } from './utils'
@@ -494,9 +495,12 @@ export async function seedDemoData() {
     ]
 
     const purchaseItems: Array<Record<string, unknown>> = []
+    const approvalLogs: Array<Record<string, unknown>> = []
     for (let i = 0; i < poSeed.length; i++) {
       const seed = poSeed[i]
       const orderDate = daysAgo(seed.daysBack)
+      const approval = seed.daysBack <= 7 ? 'pending' : seed.daysBack === 45 ? 'rejected' : 'approved'
+      const approvedDate = daysAgo(Math.max(0, seed.daysBack - 2))
       const storeIndex = PRODUCTS[seed.items[0].p].store
       const po = await insertRow<{ id: string }>('purchase_orders', {
         buyer_id: ownerId,
@@ -511,7 +515,31 @@ export async function seedDemoData() {
         shipping_fee: seed.shipping,
         other_fee: 0,
         note: seed.status === 'partial' ? '首批先到 60%，剩余随下一柜' : null,
+        approval_status: approval,
+        approved_by: approval === 'approved' ? ownerId : null,
+        approved_at: approval === 'approved' ? `${approvedDate}T10:00:00.000Z` : null,
+        approval_note:
+          approval === 'approved'
+            ? '报价与账期已核对，同意付款'
+            : approval === 'rejected'
+              ? '报价高于预算，请重新议价后送审'
+              : null,
       })
+
+      approvalLogs.push({
+        po_id: po.id,
+        action: 'submit',
+        note: '采购员提交财务审核',
+        created_at: `${orderDate}T09:00:00.000Z`,
+      })
+      if (approval !== 'pending') {
+        approvalLogs.push({
+          po_id: po.id,
+          action: approval === 'approved' ? 'approve' : 'reject',
+          note: approval === 'approved' ? '报价与账期已核对，同意付款' : '报价高于预算，请重新议价后送审',
+          created_at: `${approvedDate}T10:00:00.000Z`,
+        })
+      }
 
       for (const line of seed.items) {
         const product = PRODUCTS[line.p]
@@ -529,8 +557,91 @@ export async function seedDemoData() {
       }
     }
     await insertRows('purchase_items', purchaseItems)
+    try {
+      await insertRows('purchase_approvals', approvalLogs)
+    } catch {
+      // 旧库还没有审核流水表：主表状态仍然可用
+    }
   } catch {
     // 采购表还没建：跳过
+  }
+
+  // 12. 自有品牌产品开发：3 个项目 + 阶段节点 + 开发费用
+  try {
+    const devRows = await insertRows<{ id: string }>('dev_projects', [
+      {
+        code: `DEV-${dayjs().format('YYMM')}-01`,
+        name: '竹木折叠收纳盒（欧美站）',
+        category: '家居收纳',
+        brand: 'HOMELY',
+        owner_id: ownerId,
+        stage: 'sample',
+        status: 'active',
+        priority: 'high',
+        target_cost: 58,
+        target_price: 189,
+        target_date: daysAgo(-45),
+        supplier_id: null,
+        product_id: products[0]?.id ?? null,
+        score: 82,
+        note: '主打可折叠与环保竹材，需通过 FDA 食品接触材料检测',
+      },
+      {
+        code: `DEV-${dayjs().format('YYMM')}-02`,
+        name: '便携陶瓷咖啡杯套装',
+        category: '陶瓷餐厨',
+        brand: 'HOMELY',
+        owner_id: ownerId,
+        stage: 'testing',
+        status: 'active',
+        priority: 'normal',
+        target_cost: 76,
+        target_price: 239,
+        target_date: daysAgo(-70),
+        supplier_id: null,
+        product_id: null,
+        score: 68,
+        note: '手工釉面，重点验证跌落与耐热测试',
+      },
+      {
+        code: `DEV-${dayjs().format('YYMM')}-03`,
+        name: '真丝发圈礼盒',
+        category: '真丝配饰',
+        brand: 'SILKVIA',
+        owner_id: ownerId,
+        stage: 'launch',
+        status: 'launched',
+        priority: 'low',
+        target_cost: 42,
+        target_price: 129,
+        target_date: daysAgo(-15),
+        supplier_id: null,
+        product_id: products[8]?.id ?? null,
+        score: 75,
+        note: '已上架，跟踪首批评价与退货率',
+      },
+    ])
+
+    await insertRows('dev_milestones', [
+      { project_id: devRows[0].id, title: '竞品与价格带调研', stage: 'research', status: 'done', due_date: daysAgo(-30), finished_at: new Date().toISOString() },
+      { project_id: devRows[0].id, title: '立项评审与成本测算', stage: 'proposal', status: 'done', due_date: daysAgo(-14), finished_at: new Date().toISOString() },
+      { project_id: devRows[0].id, title: '首版打样与结构确认', stage: 'sample', status: 'doing', due_date: daysAgo(-3), owner_id: ownerId },
+      { project_id: devRows[0].id, title: '包装刀模与说明书定稿', stage: 'sample', status: 'todo', due_date: daysAgo(-10) },
+      { project_id: devRows[1].id, title: '釉面供应商比价', stage: 'proposal', status: 'done', due_date: daysAgo(-25), finished_at: new Date().toISOString() },
+      { project_id: devRows[1].id, title: '跌落与耐热测试', stage: 'testing', status: 'doing', due_date: daysAgo(-5), owner_id: ownerId },
+      { project_id: devRows[2].id, title: '首批大货验货', stage: 'mass', status: 'done', due_date: daysAgo(-20), finished_at: new Date().toISOString() },
+      { project_id: devRows[2].id, title: 'Listing 上架与广告测试', stage: 'launch', status: 'done', due_date: daysAgo(-12), finished_at: new Date().toISOString() },
+    ].map((m) => ({ ...m, user_id: ownerId })))
+
+    await insertRows('dev_costs', [
+      { project_id: devRows[0].id, title: '首版打样 3 件', category: 'sample', amount: 1860, incurred_at: daysAgo(-8) },
+      { project_id: devRows[0].id, title: '包装结构设计', category: 'design', amount: 1200, incurred_at: daysAgo(-5) },
+      { project_id: devRows[1].id, title: '食品接触材料检测', category: 'cert', amount: 3200, incurred_at: daysAgo(-12) },
+      { project_id: devRows[1].id, title: '模具开发', category: 'mold', amount: 6800, incurred_at: daysAgo(-30) },
+      { project_id: devRows[2].id, title: '礼盒打样', category: 'sample', amount: 980, incurred_at: daysAgo(-45) },
+    ].map((c) => ({ ...c, currency: 'CNY', user_id: ownerId })))
+  } catch {
+    // 旧库还没有产品开发表：跳过
   }
 
   // 11. 组织架构（演示用）：把当前账号归到一个部门 / 岗位 / 角色上，

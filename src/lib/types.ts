@@ -439,8 +439,23 @@ export interface PurchaseOrder {
   source: 'manual' | 'shortage' | 'order'
   source_order_id: string | null
   received_at: string | null
+  /** 财务审核：pending 待审 / approved 已通过 / rejected 已驳回 */
+  approval_status: 'pending' | 'approved' | 'rejected'
+  approved_by: string | null
+  approved_at: string | null
+  approval_note: string | null
   created_at: string
   updated_at: string
+}
+
+/** 采购审核流水：提交 / 通过 / 驳回 / 撤回 */
+export interface PurchaseApproval {
+  id: string
+  user_id: string
+  po_id: string
+  action: 'submit' | 'approve' | 'reject' | 'revoke'
+  note: string | null
+  created_at: string
 }
 
 export interface PurchasePayment {
@@ -587,4 +602,59 @@ export interface BrandMetric {
   note: string | null
   created_at: string
   updated_at: string
+}
+
+/* ---------------- 自有品牌产品开发 ---------------- */
+export type DevStage = 'research' | 'proposal' | 'sample' | 'testing' | 'mass' | 'launch'
+export type DevProjectStatus = 'active' | 'launched' | 'paused' | 'dropped'
+export type DevPriority = 'low' | 'normal' | 'high' | 'urgent'
+export type DevMilestoneStatus = 'todo' | 'doing' | 'done' | 'blocked'
+
+export interface DevProject {
+  id: string
+  user_id: string
+  code: string
+  name: string
+  category: string | null
+  brand: string | null
+  owner_id: string | null
+  stage: DevStage
+  status: DevProjectStatus
+  priority: DevPriority
+  target_cost: number
+  target_price: number
+  target_date: string | null
+  supplier_id: string | null
+  product_id: string | null
+  score: number
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface DevMilestone {
+  id: string
+  user_id: string
+  project_id: string
+  title: string
+  stage: DevStage
+  owner_id: string | null
+  due_date: string | null
+  status: DevMilestoneStatus
+  finished_at: string | null
+  note: string | null
+  created_at: string
+}
+
+export interface DevCost {
+  id: string
+  user_id: string
+  project_id: string
+  title: string
+  category: string
+  amount: number
+  currency: string
+  incurred_at: string
+  note: string | null
+  created_at: string
 }

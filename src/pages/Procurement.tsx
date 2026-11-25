@@ -6,23 +6,45 @@ import {
   ArrowUpRight,
   Building2,
   CalendarClock,
+  CheckCircle2,
   CircleDollarSign,
   ClipboardCheck,
   Container,
   Factory,
+  History,
   PackageCheck,
   Pencil,
   Phone,
   Plus,
+  Send,
+  ShieldCheck,
   Trash2,
   Truck,
+  XCircle,
 } from 'lucide-react'
 import dayjs from 'dayjs'
 import { callRpc, deleteRow, deleteWhere, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
 import { useAuth } from '../context/AuthContext'
-import { PAYMENT_META, PAY_METHODS, receivePurchase, registerPayment } from '../lib/flow'
+import {
+  APPROVAL_ACTION_META,
+  APPROVAL_META,
+  approvePurchase,
+  PAYMENT_META,
+  PAY_METHODS,
+  receivePurchase,
+  registerPayment,
+  submitPurchase,
+} from '../lib/flow'
 import { PAYMENT_TERMS, PO_STATUS, PURCHASE_WAREHOUSES, SUPPLIER_STATUS } from '../lib/constants'
-import type { Product, PurchaseItem, PurchaseOrder, PurchaseStatus, Store, Supplier } from '../lib/types'
+import type {
+  Product,
+  PurchaseApproval,
+  PurchaseItem,
+  PurchaseOrder,
+  PurchaseStatus,
+  Store,
+  Supplier,
+} from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import { convert, useFx } from '../lib/fx'
 import {
@@ -46,7 +68,7 @@ import { cn, dayDiff, fmtDate, money, num, relativeDay, today } from '../lib/uti
 
 const PAGE_SIZE = 15
 
-type Tab = 'orders' | 'suppliers' | 'analysis'
+type Tab = 'orders' | 'approval' | 'suppliers' | 'analysis'
 
 const STATUS_COLOR: Record<string, string> = {
   draft: '#cbd5e1',
@@ -153,6 +175,7 @@ export default function Procurement() {
   const { push } = useToast()
   const { user, can } = useAuth()
   const canBuy = can('purchase.edit')
+  const canAudit = can('finance.audit')
   const fx = useFx()
 
   const [tab, setTab] = useState<Tab>('orders')
@@ -183,6 +206,15 @@ export default function Procurement() {
   const [payNote, setPayNote] = useState('')
   const [paying, setPaying] = useState(false)
 
+  // 财务审核：提交 / 通过 / 驳回共用一个意见弹窗
+  const [review, setReview] = useState<{
+    po: PurchaseOrder
+    mode: 'submit' | 'approve' | 'reject'
+  } | null>(null)
+  const [reviewNote, setReviewNote] = useState('')
+  const [reviewing, setReviewing] = useState(false)
+  const [approvalFilter, setApprovalFilter] = useState('pending')
+
   const [supOpen, setSupOpen] = useState(false)
   const [supDraft, setSupDraft] = useState<SupplierDraft>(EMPTY_SUPPLIER)
   const [savingSup, setSavingSup] = useState(false)
@@ -191,15 +223,18 @@ export default function Procurement() {
   const [confirmLoading, setConfirmLoading] = useState(false)
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [orders, items, suppliers, products, stores, directory] = await Promise.all([
+    const [orders, items, suppliers, products, stores, directory, approvals] = await Promise.all([
       fetchRows<PurchaseOrder>('purchase_orders', { order: { column: 'order_date', ascending: false } }),
       fetchRows<PurchaseItem>('purchase_items', { order: { column: 'created_at' } }),
       fetchRows<Supplier>('suppliers', { order: { column: 'created_at' } }),
       fetchRows<Product>('products'),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
       callRpc<DirectoryRow[]>('team_directory').catch(() => []),
+      fetchRows<PurchaseApproval>('purchase_approvals', {
+        order: { column: 'created_at', ascending: false },
+      }).catch(() => [] as PurchaseApproval[]),
     ])
-    return { orders, items, suppliers, products, stores, directory }
+    return { orders, items, suppliers, products, stores, directory, approvals }
   }, [])
 
   const itemsByPo = useMemo(() => {
@@ -292,6 +327,32 @@ export default function Procurement() {
   }, [data, search, supplierFilter, statusFilter, supplierMap, itemsByPo])
 
   const pageRows = filteredOrders.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  const pendingApprovalCount = useMemo(
+    () => (data?.orders ?? []).filter((o) => o.approval_status === 'pending' && o.status !== 'cancelled').length,
+    [data],
+  )
+
+  const approvalRows = useMemo(() => {
+    const kw = search.trim().toLowerCase()
+    return (data?.orders ?? []).filter((po) => {
+      if ((po.approval_status ?? 'pending') !== approvalFilter) return false
+      if (po.status === 'cancelled') return false
+      if (!kw) return true
+      const supName = po.supplier_id ? supplierMap.get(po.supplier_id)?.name ?? '' : ''
+      return [po.po_no, supName, itemsOf(po.id).map((i) => i.sku).join(' ')]
+        .some((v) => v.toLowerCase().includes(kw))
+    })
+  }, [data, approvalFilter, search, supplierMap, itemsByPo])
+
+  const approvalsByPo = useMemo(() => {
+    const map = new Map<string, PurchaseApproval[]>()
+    for (const row of data?.approvals ?? []) {
+      if (!map.has(row.po_id)) map.set(row.po_id, [])
+      map.get(row.po_id)!.push(row)
+    }
+    return map
+  }, [data])
 
   const filteredSuppliers = useMemo(() => {
     const kw = search.trim().toLowerCase()
@@ -392,9 +453,11 @@ export default function Procurement() {
     const valid = itemDrafts.filter((r) => r.sku.trim() && Number(r.quantity) > 0)
     if (!valid.length) return push('至少需要一条有效明细：SKU + 数量', 'error')
 
+    // 改动未付款的采购单会改变审核依据，必须重新送审
+    const needResubmit = !!editingPo && Number(editingPo.paid_amount || 0) === 0
     setSavingPo(true)
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         po_no: poDraft.po_no.trim(),
         supplier_id: poDraft.supplier_id || null,
         store_id: poDraft.store_id || null,
@@ -408,6 +471,9 @@ export default function Procurement() {
         note: poDraft.note.trim() || null,
         buyer_id: poDraft.buyer_id || user?.id || null,
         updated_at: new Date().toISOString(),
+        ...(needResubmit
+          ? { approval_status: 'pending', approved_by: null, approved_at: null, approval_note: null }
+          : {}),
       }
 
       let poId = editingPo?.id
@@ -438,7 +504,13 @@ export default function Procurement() {
         })),
       )
 
-      push(editingPo ? '采购单已更新' : '采购单已创建')
+      push(
+        needResubmit
+          ? '采购单已更新，金额与付款条件已变更，请重新提交财务审核'
+          : editingPo
+            ? '采购单已更新'
+            : '采购单已创建，提交财务审核后才能登记付款',
+      )
       setPoOpen(false)
       reload()
     } catch (err) {
@@ -534,6 +606,34 @@ export default function Procurement() {
       push(err instanceof Error ? err.message : '付款登记失败', 'error')
     } finally {
       setPaying(false)
+    }
+  }
+
+  /* ---------------- 财务审核 ---------------- */
+
+  function openReview(po: PurchaseOrder, mode: 'submit' | 'approve' | 'reject') {
+    setReview({ po, mode })
+    setReviewNote('')
+  }
+
+  async function handleReview() {
+    if (!review) return
+    setReviewing(true)
+    try {
+      if (review.mode === 'submit') {
+        await submitPurchase(review.po.id, reviewNote.trim() || undefined)
+        push('已提交财务审核')
+      } else {
+        const decision = review.mode === 'approve' ? 'approved' : 'rejected'
+        const res = await approvePurchase(review.po.id, decision, reviewNote.trim() || undefined)
+        push(res.status === 'approved' ? '已审核通过，可以登记付款' : '已驳回，采购员修改后可重新提交', 'info')
+      }
+      setReview(null)
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '审核操作失败', 'error')
+    } finally {
+      setReviewing(false)
     }
   }
 
@@ -686,6 +786,10 @@ export default function Procurement() {
               onChange={(v) => { setTab(v as Tab); setSearch(''); setPage(1) }}
               options={[
                 { value: 'orders', label: '采购单' },
+                {
+                  value: 'approval',
+                  label: `财务审核${pendingApprovalCount ? ` · ${pendingApprovalCount}` : ''}`,
+                },
                 { value: 'suppliers', label: '供应商' },
                 { value: 'analysis', label: '采购分析' },
               ]}
@@ -869,6 +973,16 @@ export default function Procurement() {
                                 </span>
                               )}
                             </div>
+                            <div className="mt-1">
+                              <span
+                                className={cn(
+                                  'text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap',
+                                  (APPROVAL_META[po.approval_status ?? 'pending'] ?? APPROVAL_META.pending).cls,
+                                )}
+                              >
+                                {(APPROVAL_META[po.approval_status ?? 'pending'] ?? APPROVAL_META.pending).label}
+                              </span>
+                            </div>
                           </td>
                           <td className="td" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -881,11 +995,43 @@ export default function Procurement() {
                                   <PackageCheck className="w-3.5 h-3.5" />
                                 </button>
                               )}
+                              {canBuy && po.status !== 'cancelled' && po.approval_status !== 'approved' && (
+                                <button
+                                  className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50"
+                                  onClick={() => openReview(po, 'submit')}
+                                  title={po.approval_status === 'rejected' ? '重新提交财务审核' : '提交财务审核'}
+                                >
+                                  <Send className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              {canAudit && po.approval_status === 'pending' && po.status !== 'cancelled' && (
+                                <>
+                                  <button
+                                    className="p-1.5 rounded-md text-ink-400 hover:text-emerald-600 hover:bg-emerald-50"
+                                    onClick={() => openReview(po, 'approve')}
+                                    title="财务审核通过"
+                                  >
+                                    <CheckCircle2 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
+                                    onClick={() => openReview(po, 'reject')}
+                                    title="财务驳回"
+                                  >
+                                    <XCircle className="w-3.5 h-3.5" />
+                                  </button>
+                                </>
+                              )}
                               {canBuy && po.status !== 'cancelled' && (
                                 <button
-                                  className="p-1.5 rounded-md text-ink-400 hover:text-violet-600 hover:bg-violet-50"
-                                  onClick={() => openPay(po)}
-                                  title="登记付款"
+                                  className={cn(
+                                    'p-1.5 rounded-md',
+                                    po.approval_status === 'approved'
+                                      ? 'text-ink-400 hover:text-violet-600 hover:bg-violet-50'
+                                      : 'text-ink-300 cursor-not-allowed',
+                                  )}
+                                  onClick={() => po.approval_status === 'approved' && openPay(po)}
+                                  title={po.approval_status === 'approved' ? '登记付款' : '需先通过财务审核才能付款'}
                                 >
                                   <CircleDollarSign className="w-3.5 h-3.5" />
                                 </button>
@@ -916,6 +1062,166 @@ export default function Procurement() {
             )}
           </div>
         </>
+      )}
+
+      {tab === 'approval' && (
+        <div className="card overflow-hidden">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-ink-100">
+            <p className="flex items-center gap-1.5 text-[12.5px] font-medium text-ink-700 mr-2">
+              <ShieldCheck className="w-4 h-4 text-brand-600" /> 采购财务审核
+            </p>
+            <SearchInput
+              value={search}
+              onChange={(v) => setSearch(v)}
+              placeholder="采购单号 / 供应商 / SKU"
+              className="w-full sm:w-56"
+            />
+            <Select
+              className="w-full sm:w-32"
+              value={approvalFilter}
+              onChange={setApprovalFilter}
+              placeholder="审核状态"
+              options={[
+                { value: 'pending', label: '待审核' },
+                { value: 'approved', label: '已通过' },
+                { value: 'rejected', label: '已驳回' },
+              ]}
+            />
+            <span className="ml-auto text-[11.5px] text-ink-400">
+              待审 <span className="num text-amber-600 font-semibold">{num(pendingApprovalCount)}</span> 张 ·
+              财务通过后才可登记付款
+            </span>
+          </div>
+
+          {error ? (
+            <ErrorBlock message={error} onRetry={reload} />
+          ) : loading ? (
+            <LoadingBlock rows={6} />
+          ) : approvalRows.length === 0 ? (
+            <EmptyState
+              icon={<ShieldCheck className="w-5 h-5" />}
+              title="没有匹配的采购单"
+              description="采购员提交审核后会出现在这里；审核通过的采购单才能登记付款。"
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[1000px]">
+                <thead>
+                  <tr>
+                    <th className="th">采购单号</th>
+                    <th className="th">供应商 / 采购员</th>
+                    <th className="th text-right">金额</th>
+                    <th className="th">审核状态</th>
+                    <th className="th">最近流水</th>
+                    <th className="th">审核意见</th>
+                    <th className="th w-36" />
+                  </tr>
+                </thead>
+                <tbody>
+                  {approvalRows.map((po) => {
+                    const meta = APPROVAL_META[po.approval_status ?? 'pending'] ?? APPROVAL_META.pending
+                    const last = (approvalsByPo.get(po.id) ?? [])[0]
+                    const actionMeta = last ? APPROVAL_ACTION_META[last.action] : null
+                    return (
+                      <tr key={po.id} className="hover:bg-ink-50/60">
+                        <td className="td">
+                          <button
+                            className="text-[12.5px] font-medium text-ink-800 font-mono hover:text-brand-600"
+                            onClick={() => setDetailPoId(po.id)}
+                          >
+                            {po.po_no}
+                          </button>
+                          <p className="text-[10.5px] text-ink-400">{fmtDate(po.order_date)} 下单</p>
+                        </td>
+                        <td className="td">
+                          <p className="text-[12px] text-ink-700 truncate max-w-[180px]">
+                            {po.supplier_id ? supplierMap.get(po.supplier_id)?.name ?? '—' : '未指定'}
+                          </p>
+                          <p className="text-[10.5px] text-ink-400">
+                            {po.buyer_id ? memberMap.get(po.buyer_id)?.full_name ?? '未指派' : '未指派'}
+                          </p>
+                        </td>
+                        <td className="td text-right">
+                          <p className="num font-medium text-ink-800">{money(totalOf(po), po.currency)}</p>
+                          {po.currency !== 'CNY' && (
+                            <p className="text-[10.5px] text-ink-400 num">≈ {money(cnyOf(po), 'CNY')}</p>
+                          )}
+                        </td>
+                        <td className="td">
+                          <span className={cn('text-[10.5px] px-2 py-1 rounded border whitespace-nowrap', meta.cls)}>
+                            {meta.label}
+                          </span>
+                          {po.approved_at && (
+                            <p className="text-[10px] text-ink-400 num mt-1">{fmtDate(po.approved_at, 'MM-DD HH:mm')}</p>
+                          )}
+                        </td>
+                        <td className="td">
+                          {last ? (
+                            <>
+                              <p className={cn('text-[11.5px] font-medium', actionMeta?.cls ?? 'text-ink-600')}>
+                                {actionMeta?.label ?? last.action}
+                              </p>
+                              <p className="text-[10.5px] text-ink-400">
+                                {last.user_id ? memberMap.get(last.user_id)?.full_name ?? '—' : '—'} ·{' '}
+                                {relativeDay(last.created_at.slice(0, 10))}
+                              </p>
+                            </>
+                          ) : (
+                            <span className="text-[11px] text-ink-400">暂无提交记录</span>
+                          )}
+                        </td>
+                        <td className="td">
+                          <p className="text-[11px] text-ink-500 line-clamp-2 max-w-[200px]">
+                            {po.approval_note || last?.note || '—'}
+                          </p>
+                        </td>
+                        <td className="td">
+                          <div className="flex items-center gap-1 flex-wrap">
+                            {canBuy && po.approval_status !== 'approved' && (
+                              <Button
+                                size="sm"
+                                variant="default"
+                                icon={<Send className="w-3 h-3" />}
+                                onClick={() => openReview(po, 'submit')}
+                              >
+                                {po.approval_status === 'rejected' ? '重新提交' : '提交审核'}
+                              </Button>
+                            )}
+                            {canBuy && po.approval_status === 'approved' && Number(po.paid_amount || 0) === 0 && (
+                              <Button size="sm" variant="ghost" onClick={() => openReview(po, 'submit')}>
+                                撤回重审
+                              </Button>
+                            )}
+                            {canAudit && po.approval_status === 'pending' && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="primary"
+                                  icon={<CheckCircle2 className="w-3 h-3" />}
+                                  onClick={() => openReview(po, 'approve')}
+                                >
+                                  通过
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="danger"
+                                  icon={<XCircle className="w-3 h-3" />}
+                                  onClick={() => openReview(po, 'reject')}
+                                >
+                                  驳回
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       )}
 
       {tab === 'suppliers' && (
@@ -1206,7 +1512,32 @@ export default function Procurement() {
                 编辑
               </Button>
             )}
-            {detailPo && canBuy && detailPo.status !== 'cancelled' && (
+            {detailPo && canBuy && detailPo.approval_status !== 'approved' && detailPo.status !== 'cancelled' && (
+              <Button
+                icon={<Send className="w-3.5 h-3.5" />}
+                onClick={() => { const po = detailPo; setDetailPoId(null); openReview(po, 'submit') }}
+              >
+                {detailPo.approval_status === 'rejected' ? '重新提交审核' : '提交财务审核'}
+              </Button>
+            )}
+            {detailPo && canAudit && detailPo.approval_status === 'pending' && (
+              <>
+                <Button
+                  icon={<CheckCircle2 className="w-3.5 h-3.5" />}
+                  onClick={() => { const po = detailPo; setDetailPoId(null); openReview(po, 'approve') }}
+                >
+                  审核通过
+                </Button>
+                <Button
+                  variant="danger"
+                  icon={<XCircle className="w-3.5 h-3.5" />}
+                  onClick={() => { const po = detailPo; setDetailPoId(null); openReview(po, 'reject') }}
+                >
+                  驳回
+                </Button>
+              </>
+            )}
+            {detailPo && canBuy && detailPo.approval_status === 'approved' && detailPo.status !== 'cancelled' && (
               <Button icon={<CircleDollarSign className="w-3.5 h-3.5" />} onClick={() => { const po = detailPo; setDetailPoId(null); openPay(po) }}>
                 登记付款
               </Button>
@@ -1225,6 +1556,12 @@ export default function Procurement() {
               {[
                 { label: '状态', value: PO_STATUS[detailPo.status]?.label ?? detailPo.status },
                 { label: '付款', value: `${(PAYMENT_META[detailPo.payment_status ?? 'unpaid'] ?? PAYMENT_META.unpaid).label} ${money(detailPo.paid_amount, detailPo.currency)}` },
+                {
+                  label: '财务审核',
+                  value: `${(APPROVAL_META[detailPo.approval_status ?? 'pending'] ?? APPROVAL_META.pending).label}${
+                    detailPo.approved_by ? ` · ${memberMap.get(detailPo.approved_by)?.full_name ?? ''}` : ''
+                  }`,
+                },
                 {
                   label: '采购员',
                   value: (detailPo.buyer_id && memberMap.get(detailPo.buyer_id)?.full_name) || '未指派',
@@ -1294,6 +1631,38 @@ export default function Procurement() {
                 {detailPo.note}
               </div>
             )}
+
+            <div className="rounded-lg border border-ink-200/70 overflow-hidden">
+              <div className="flex items-center gap-1.5 px-3 py-2 bg-ink-50/60">
+                <History className="w-3.5 h-3.5 text-ink-400" />
+                <p className="text-[11px] font-semibold text-ink-600">审核流水</p>
+                {detailPo.approval_note && (
+                  <p className="ml-auto text-[10.5px] text-ink-400 truncate max-w-[320px]">
+                    最新意见：{detailPo.approval_note}
+                  </p>
+                )}
+              </div>
+              {(approvalsByPo.get(detailPo.id) ?? []).length === 0 ? (
+                <p className="px-3 py-3 text-[11.5px] text-ink-400">暂无审核记录，采购员提交后财务才能审核。</p>
+              ) : (
+                <div className="divide-y divide-ink-100">
+                  {(approvalsByPo.get(detailPo.id) ?? []).map((log) => (
+                    <div key={log.id} className="flex items-start gap-2 px-3 py-2">
+                      <span className={cn('text-[11px] font-medium shrink-0', APPROVAL_ACTION_META[log.action]?.cls ?? 'text-ink-500')}>
+                        {APPROVAL_ACTION_META[log.action]?.label ?? log.action}
+                      </span>
+                      <span className="text-[11px] text-ink-600 break-all flex-1">
+                        {log.note || '—'}
+                      </span>
+                      <span className="text-[10px] text-ink-400 shrink-0 num">
+                        {memberMap.get(log.user_id)?.full_name ?? '—'} · {fmtDate(log.created_at, 'MM-DD HH:mm')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {detailPo.currency !== 'CNY' && (
               <p className="text-[11px] text-ink-400">
                 按当前汇率折算约 <span className="num text-ink-600">{money(cnyOf(detailPo), 'CNY')}</span>
@@ -1476,7 +1845,11 @@ export default function Procurement() {
         open={!!payPo}
         onClose={() => setPayPo(null)}
         title="登记采购付款"
-        description={payPo ? `${payPo.po_no} · 应付 ${money(totalOf(payPo), payPo.currency)}` : undefined}
+        description={
+          payPo
+            ? `${payPo.po_no} · 应付 ${money(totalOf(payPo), payPo.currency)} · 已通过财务审核`
+            : undefined
+        }
         width="max-w-lg"
         footer={
           <>
@@ -1684,6 +2057,96 @@ export default function Procurement() {
             <textarea className="textarea" rows={2} value={supDraft.note} onChange={(e) => setSupDraft({ ...supDraft, note: e.target.value })} placeholder="起订量、开票能力、验厂情况…" />
           </Field>
         </div>
+      </Modal>
+
+      {/* ---------------- 财务审核意见 ---------------- */}
+      <Modal
+        open={!!review}
+        onClose={() => setReview(null)}
+        title={
+          review?.mode === 'submit'
+            ? review.po.approval_status === 'rejected'
+              ? '重新提交财务审核'
+              : '提交财务审核'
+            : review?.mode === 'approve'
+              ? '审核通过采购单'
+              : '驳回采购单'
+        }
+        description={
+          review
+            ? `${review.po.po_no} · ${money(totalOf(review.po), review.po.currency)}`
+            : undefined
+        }
+        width="max-w-lg"
+        footer={
+          <>
+            <Button onClick={() => setReview(null)}>取消</Button>
+            <Button
+              variant={review?.mode === 'reject' ? 'danger' : 'primary'}
+              onClick={handleReview}
+              loading={reviewing}
+              icon={
+                review?.mode === 'submit' ? <Send className="w-3.5 h-3.5" /> :
+                review?.mode === 'approve' ? <CheckCircle2 className="w-3.5 h-3.5" /> :
+                <XCircle className="w-3.5 h-3.5" />
+              }
+            >
+              {review?.mode === 'submit' ? '确认提交' : review?.mode === 'approve' ? '确认通过' : '确认驳回'}
+            </Button>
+          </>
+        }
+      >
+        {review && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-ink-200/70 bg-ink-50/50 px-3 py-2.5 space-y-1 text-[11.5px]">
+              <p className="flex justify-between gap-3">
+                <span className="text-ink-400">供应商</span>
+                <span className="text-ink-700 truncate">
+                  {review.po.supplier_id ? supplierMap.get(review.po.supplier_id)?.name ?? '—' : '未指定'}
+                </span>
+              </p>
+              <p className="flex justify-between gap-3">
+                <span className="text-ink-400">采购金额</span>
+                <span className="num text-ink-800">{money(totalOf(review.po), review.po.currency)}</span>
+              </p>
+              <p className="flex justify-between gap-3">
+                <span className="text-ink-400">采购员</span>
+                <span className="text-ink-700">
+                  {review.po.buyer_id ? memberMap.get(review.po.buyer_id)?.full_name ?? '—' : '—'}
+                </span>
+              </p>
+              {review.po.note && (
+                <p className="text-ink-500 pt-1 border-t border-ink-200/70 whitespace-pre-wrap">
+                  采购备注：{review.po.note}
+                </p>
+              )}
+            </div>
+            <Field
+              label={review.mode === 'submit' ? '送审说明（选填）' : '审核意见（选填）'}
+              hint={
+                review.mode === 'approve'
+                  ? '通过后该采购单即可登记付款，意见会留在审核流水里'
+                  : review.mode === 'reject'
+                    ? '请写明驳回原因，采购员修改后可重新提交'
+                    : '可说明价格、账期或到货要求，方便财务判断'
+              }
+            >
+              <textarea
+                className="textarea"
+                rows={3}
+                value={reviewNote}
+                onChange={(e) => setReviewNote(e.target.value)}
+                placeholder={
+                  review.mode === 'approve'
+                    ? '金额与账期已核对无误'
+                    : review.mode === 'reject'
+                      ? '报价高于预算，请重新议价'
+                      : '请核对付款条件'
+                }
+              />
+            </Field>
+          </div>
+        )}
       </Modal>
 
       <ConfirmDialog

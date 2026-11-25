@@ -48,7 +48,24 @@ export function receivePurchase(poId: string, lines: ReceiveLine[], warehouse?: 
   )
 }
 
-/** 采购付款登记：自动维护已付金额与付款状态 */
+/** 采购单提交财务审核（已审核的单再次调用 = 撤回重审） */
+export function submitPurchase(poId: string, note?: string) {
+  return callRpc<{ ok: boolean; status: 'pending' }>('submit_purchase', {
+    p_po_id: poId,
+    p_note: note ?? null,
+  })
+}
+
+/** 财务审核采购单：通过后才能登记付款 */
+export function approvePurchase(poId: string, decision: 'approved' | 'rejected', note?: string) {
+  return callRpc<{ ok: boolean; status: 'approved' | 'rejected' }>('approve_purchase', {
+    p_po_id: poId,
+    p_decision: decision,
+    p_note: note ?? null,
+  })
+}
+
+/** 采购付款登记：自动维护已付金额与付款状态（数据库强制要求已审核） */
 export function registerPayment(
   poId: string,
   amount: number,
@@ -167,6 +184,19 @@ export const PAYMENT_META: Record<string, { label: string; cls: string }> = {
   unpaid: { label: '未付款', cls: 'bg-rose-50 text-rose-700 border-rose-200/70' },
   partial: { label: '部分付款', cls: 'bg-amber-50 text-amber-700 border-amber-200/70' },
   paid: { label: '已付清', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
+}
+
+export const APPROVAL_META: Record<string, { label: string; cls: string }> = {
+  pending: { label: '待财务审核', cls: 'bg-amber-50 text-amber-700 border-amber-200/70' },
+  approved: { label: '财务已通过', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
+  rejected: { label: '财务已驳回', cls: 'bg-rose-50 text-rose-700 border-rose-200/70' },
+}
+
+export const APPROVAL_ACTION_META: Record<string, { label: string; cls: string }> = {
+  submit: { label: '提交审核', cls: 'text-brand-600' },
+  revoke: { label: '撤回重审', cls: 'text-amber-600' },
+  approve: { label: '审核通过', cls: 'text-emerald-600' },
+  reject: { label: '审核驳回', cls: 'text-rose-600' },
 }
 
 export const PAY_METHODS = [

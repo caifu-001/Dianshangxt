@@ -8,6 +8,7 @@ import {
   CheckSquare,
   Database,
   Factory,
+  FlaskConical,
   Globe2,
   KeyRound,
   LayoutDashboard,
@@ -55,6 +56,7 @@ const NAV_GROUPS: Array<{
       { to: '/cockpit', label: '数据驾驶舱', icon: MonitorPlay, perm: 'orders.view' },
       { to: '/stores', label: '店铺管理', icon: StoreIcon, perm: 'stores.view' },
       { to: '/products', label: '商品管理', icon: Package, perm: 'products.view' },
+      { to: '/development', label: '产品开发', icon: FlaskConical, perm: 'dev.view' },
     ],
   },
   {

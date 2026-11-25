@@ -66,10 +66,12 @@ export type PermissionCode =
   | 'creators.view' | 'creators.edit'
   | 'competitors.view' | 'competitors.edit'
   | 'brand.view' | 'brand.edit'
+  | 'dev.view' | 'dev.edit'
   | 'profit.view' | 'profit.edit'
   | 'tasks.view' | 'tasks.edit'
   | 'performance.view' | 'performance.edit'
   | 'hr.view' | 'hr.manage'
+  | 'finance.audit'
   | 'data.delete'
   | 'account.manage'
   | 'org.manage'
@@ -88,6 +90,7 @@ export interface ModuleDef {
 export const MODULES: ModuleDef[] = [
   { key: 'stores', label: '店铺管理', desc: '店铺档案、站点与目标 ACOS', view: 'stores.view', edit: 'stores.edit', group: '经营' },
   { key: 'products', label: '商品管理', desc: 'SKU、成本与售价', view: 'products.view', edit: 'products.edit', group: '经营' },
+  { key: 'development', label: '产品开发', desc: '自有品牌立项、打样、成本与上市节点', view: 'dev.view', edit: 'dev.edit', group: '经营' },
   { key: 'orders', label: '订单管理', desc: '订单、退款与利润明细', view: 'orders.view', edit: 'orders.edit', group: '交易' },
   { key: 'inventory', label: '库存管理', desc: '库存水位与补货建议', view: 'inventory.view', edit: 'inventory.edit', group: '交易' },
   { key: 'purchase', label: '采购管理', desc: '供应商、采购单与到货入库', view: 'purchase.view', edit: 'purchase.edit', group: '交易' },
@@ -104,9 +107,10 @@ export const MODULES: ModuleDef[] = [
 export const FUNCTION_META: Record<string, { label: string; desc: string }> = {
   'hr.view': { label: '人事档案', desc: '查看花名册、入离职记录与人员变动流水' },
   'hr.manage': { label: '入离职办理', desc: '开通账号、确认入职、办理离职与资源移交' },
+  'finance.audit': { label: '采购财务审核', desc: '审核采购单金额与付款条件，通过后才能登记付款' },
 }
 
-export const FUNCTION_CODES: PermissionCode[] = ['hr.view', 'hr.manage']
+export const FUNCTION_CODES: PermissionCode[] = ['hr.view', 'hr.manage', 'finance.audit']
 
 /* ------------------------------------------------------------------ */
 /*  部门模板                                                           */
@@ -154,8 +158,8 @@ export const DEPT_TEMPLATES: DeptTemplate[] = [
     key: 'ops',
     name: '运营部',
     code: 'OPS',
-    desc: '店铺、商品、订单、库存、采购与任务看板',
-    scope: [...moduleScope(['stores', 'products', 'orders', 'inventory', 'purchase', 'tasks']), 'performance.view'],
+    desc: '店铺、商品、订单、库存、采购、产品开发与任务看板',
+    scope: [...moduleScope(['stores', 'products', 'development', 'orders', 'inventory', 'purchase', 'tasks']), 'performance.view'],
   },
   {
     key: 'ads',
@@ -175,8 +179,8 @@ export const DEPT_TEMPLATES: DeptTemplate[] = [
     key: 'fin',
     name: '财务部',
     code: 'FIN',
-    desc: '利润核算与费用台账，订单、采购、商品只读',
-    scope: ['profit.view', 'profit.edit', 'orders.view', 'purchase.view', 'products.view', 'stores.view', 'performance.view'],
+    desc: '利润核算、采购财务审核与费用台账，订单、采购、商品只读',
+    scope: ['profit.view', 'profit.edit', 'orders.view', 'purchase.view', 'products.view', 'stores.view', 'performance.view', 'finance.audit'],
   },
 ]
 

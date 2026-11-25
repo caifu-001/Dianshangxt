@@ -738,6 +738,11 @@ alter table public.purchase_orders add column if not exists paid_amount    numer
 alter table public.purchase_orders add column if not exists source         text not null default 'manual';
 alter table public.purchase_orders add column if not exists source_order_id uuid references public.orders(id) on delete set null;
 alter table public.purchase_orders add column if not exists received_at    timestamptz;
+-- 财务审核：采购单下给供应商之前由财务确认金额与付款条件，未通过不允许登记付款
+alter table public.purchase_orders add column if not exists approval_status text not null default 'pending';
+alter table public.purchase_orders add column if not exists approved_by     uuid references public.profiles(id) on delete set null;
+alter table public.purchase_orders add column if not exists approved_at     timestamptz;
+alter table public.purchase_orders add column if not exists approval_note   text;
 do $$ begin
   alter table public.purchase_orders drop constraint if exists purchase_orders_payment_chk;
   alter table public.purchase_orders add constraint purchase_orders_payment_chk
@@ -745,9 +750,21 @@ do $$ begin
   alter table public.purchase_orders drop constraint if exists purchase_orders_source_chk;
   alter table public.purchase_orders add constraint purchase_orders_source_chk
     check (source in ('manual', 'shortage', 'order'));
+  alter table public.purchase_orders drop constraint if exists purchase_orders_approval_chk;
+  alter table public.purchase_orders add constraint purchase_orders_approval_chk
+    check (approval_status in ('pending', 'approved', 'rejected'));
 end $$;
 create index if not exists idx_po_buyer  on public.purchase_orders(buyer_id);
 create index if not exists idx_po_source on public.purchase_orders(source_order_id);
+create index if not exists idx_po_approval on public.purchase_orders(approval_status, order_date desc);
+
+-- 老库升级：已经付过款 / 已到货的历史单视为「已审核」，避免历史数据被新闸门卡住
+update public.purchase_orders
+   set approval_status = 'approved',
+       approved_at     = coalesce(updated_at, now()),
+       approval_note   = '历史单据自动通过'
+ where approval_status = 'pending'
+   and (coalesce(paid_amount, 0) > 0 or status in ('partial', 'received'));
 
 -- 任务：责任人（真人员，不是字符串）+ 单据关联，让协作可回溯
 alter table public.tasks add column if not exists owner_id uuid references public.profiles(id) on delete set null;
@@ -801,6 +818,91 @@ create table if not exists public.purchase_payments (
 );
 create index if not exists idx_payments_po   on public.purchase_payments(po_id, paid_at desc);
 create index if not exists idx_payments_time on public.purchase_payments(paid_at desc);
+
+-- 采购审核流水：提交 / 通过 / 驳回 / 撤回都会留痕，只追加不修改
+create table if not exists public.purchase_approvals (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  po_id      uuid not null references public.purchase_orders(id) on delete cascade,
+  action     text not null check (action in ('submit', 'approve', 'reject', 'revoke')),
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_po_approvals_po   on public.purchase_approvals(po_id, created_at desc);
+create index if not exists idx_po_approvals_time on public.purchase_approvals(created_at desc);
+
+-- -------------------------------------------------------------
+-- 12b. 自有品牌产品开发：立项 → 调研 → 打样 → 测试 → 量产 → 上市
+--      projects 记录项目主档，milestones 记录阶段节点，costs 记录开发投入
+-- -------------------------------------------------------------
+create table if not exists public.dev_projects (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  code         text not null,                            -- 项目编号，如 DEV-2601
+  name         text not null,
+  category     text,                                     -- 所属类目
+  brand        text,                                     -- 自有品牌
+  owner_id     uuid references public.profiles(id) on delete set null,
+  stage        text not null default 'research',
+  status       text not null default 'active',
+  priority     text not null default 'normal',
+  target_cost  numeric(12,2) not null default 0,
+  target_price numeric(12,2) not null default 0,
+  target_date  date,
+  supplier_id  uuid references public.suppliers(id) on delete set null,
+  product_id   uuid references public.products(id) on delete set null, -- 上市后关联 SKU
+  score        integer not null default 0 check (score between 0 and 100),
+  note         text,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create unique index if not exists uq_dev_projects_code on public.dev_projects(code);
+create index if not exists idx_dev_projects_stage  on public.dev_projects(stage, status);
+create index if not exists idx_dev_projects_owner  on public.dev_projects(owner_id);
+
+create table if not exists public.dev_milestones (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  project_id  uuid not null references public.dev_projects(id) on delete cascade,
+  title       text not null,
+  stage       text not null default 'sample',
+  owner_id    uuid references public.profiles(id) on delete set null,
+  due_date    date,
+  status      text not null default 'todo' check (status in ('todo', 'doing', 'done', 'blocked')),
+  finished_at timestamptz,
+  note        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_dev_milestones_project on public.dev_milestones(project_id, due_date);
+
+create table if not exists public.dev_costs (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  project_id  uuid not null references public.dev_projects(id) on delete cascade,
+  title       text not null,
+  category    text not null default 'other',   -- mold / sample / cert / design / logistics / other
+  amount      numeric(12,2) not null default 0,
+  currency    text not null default 'CNY',
+  incurred_at date not null default current_date,
+  note        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_dev_costs_project on public.dev_costs(project_id, incurred_at desc);
+
+do $$ begin
+  alter table public.dev_projects drop constraint if exists dev_projects_stage_chk;
+  alter table public.dev_projects add constraint dev_projects_stage_chk
+    check (stage in ('research', 'proposal', 'sample', 'testing', 'mass', 'launch'));
+  alter table public.dev_projects drop constraint if exists dev_projects_status_chk;
+  alter table public.dev_projects add constraint dev_projects_status_chk
+    check (status in ('active', 'launched', 'paused', 'dropped'));
+  alter table public.dev_projects drop constraint if exists dev_projects_priority_chk;
+  alter table public.dev_projects add constraint dev_projects_priority_chk
+    check (priority in ('low', 'normal', 'high', 'urgent'));
+  alter table public.dev_milestones drop constraint if exists dev_milestones_stage_chk;
+  alter table public.dev_milestones add constraint dev_milestones_stage_chk
+    check (stage in ('research', 'proposal', 'sample', 'testing', 'mass', 'launch'));
+end $$;
 
 -- =============================================================
 --  行级安全（RLS）与角色权限
@@ -927,7 +1029,8 @@ as $$
         and code not like 'performance.%' and code not like 'hr.%'
       else
         (code = any(coalesce(x.role_perms, '{}')) or code = any(x.dept))
-        and (code like '%.view' or code like '%.edit' or code like 'hr.%' or code like 'performance.%')
+        and (code like '%.view' or code like '%.edit' or code like 'hr.%' or code like 'performance.%'
+             or code like 'finance.%')
     end
     from (
       select p.status, p.role, p.role_id,
@@ -948,8 +1051,9 @@ declare
     'campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
     'departments','positions','roles','access_requests','employee_events',
-    'performance_reviews','stock_movements','purchase_payments',
-    'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics'
+    'performance_reviews','stock_movements','purchase_payments','purchase_approvals',
+    'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics',
+    'dev_projects','dev_milestones','dev_costs'
   ];
 begin
   foreach t in array tabs loop
@@ -1025,7 +1129,8 @@ begin
       ('brand_social_accounts', 'brand'),
       ('brand_influencers', 'brand'),
       ('brand_pr_contacts', 'brand'),
-      ('brand_metrics', 'brand')
+      ('brand_metrics', 'brand'),
+      ('dev_projects', 'dev')
     ) as v(tbl, perm)
   loop
     -- 清理历史策略（旧版为 xxx_owner_all，按 user_id 隔离）
@@ -1070,7 +1175,10 @@ begin
       ('purchase_payments',    'purchase'),
       ('stock_movements',      'inventory'),
       ('supplier_products',    'purchase'),
-      ('supplier_contacts',    'purchase')
+      ('supplier_contacts',    'purchase'),
+      ('purchase_approvals',   'purchase'),
+      ('dev_milestones',       'dev'),
+      ('dev_costs',            'dev')
     ) as v(tbl, perm)
   loop
     execute format('drop policy if exists %I on public.%I', rec.tbl || '_select', rec.tbl);
@@ -1737,6 +1845,78 @@ as $$
        + coalesce((select shipping_fee + other_fee from public.purchase_orders where id = p_po_id), 0);
 $$;
 
+-- ---------- 采购审核：提交（采购员）/ 通过或驳回（财务） ----------
+-- 所有判定放在 security definer 函数里：绕过界面直接改表也过不了付款闸门
+create or replace function public.submit_purchase(
+  p_po_id uuid,
+  p_note  text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  po record;
+begin
+  if not public.has_permission('purchase.edit') then
+    raise exception '没有采购编辑权限';
+  end if;
+  select * into po from public.purchase_orders where id = p_po_id for update;
+  if not found then raise exception '采购单不存在'; end if;
+  if po.status = 'cancelled' then raise exception '已取消的采购单不能提交审核'; end if;
+  if po.approval_status = 'approved' and coalesce(po.paid_amount, 0) > 0 then
+    raise exception '已付款的采购单不能撤回审核';
+  end if;
+
+  update public.purchase_orders
+     set approval_status = 'pending', approved_by = null, approved_at = null,
+         approval_note = nullif(btrim(coalesce(p_note, '')), ''), updated_at = now()
+   where id = po.id;
+  insert into public.purchase_approvals (user_id, po_id, action, note)
+  values (auth.uid(), po.id, case when po.approval_status = 'approved' then 'revoke' else 'submit' end, p_note);
+  return jsonb_build_object('ok', true, 'status', 'pending');
+end;
+$$;
+
+create or replace function public.approve_purchase(
+  p_po_id    uuid,
+  p_decision text,
+  p_note     text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  po     record;
+  v_role text;
+begin
+  if not public.has_permission('finance.audit') then
+    raise exception '没有采购财务审核权限';
+  end if;
+  if coalesce(p_decision, '') not in ('approved', 'rejected') then
+    raise exception '审核结果只能是 approved 或 rejected';
+  end if;
+  select * into po from public.purchase_orders where id = p_po_id for update;
+  if not found then raise exception '采购单不存在'; end if;
+  if po.status = 'cancelled' then raise exception '已取消的采购单不能审核'; end if;
+  if po.approval_status <> 'pending' then
+    raise exception '该采购单已审核，如需变更请先撤回重新提交';
+  end if;
+  select role into v_role from public.profiles where id = auth.uid();
+  if coalesce(po.buyer_id, po.user_id) = auth.uid() and coalesce(v_role, 'member') <> 'super_admin' then
+    raise exception '不能审核自己创建的采购单';
+  end if;
+
+  update public.purchase_orders
+     set approval_status = p_decision,
+         approved_by = auth.uid(),
+         approved_at = now(),
+         approval_note = nullif(btrim(coalesce(p_note, '')), ''),
+         updated_at = now()
+   where id = po.id;
+  insert into public.purchase_approvals (user_id, po_id, action, note)
+  values (auth.uid(), po.id, case when p_decision = 'approved' then 'approve' else 'reject' end, p_note);
+  return jsonb_build_object('ok', true, 'status', p_decision);
+end;
+$$;
+
 -- ---------- 付款登记：自动维护已付金额与付款状态 ----------
 create or replace function public.register_payment(
   p_po_id    uuid,
@@ -1763,6 +1943,12 @@ begin
 
   select * into po from public.purchase_orders where id = p_po_id for update;
   if not found then raise exception '采购单不存在'; end if;
+  if po.approval_status <> 'approved' then
+    raise exception '采购单尚未通过财务审核，不能登记付款';
+  end if;
+  if po.status = 'cancelled' then
+    raise exception '已取消的采购单不能付款';
+  end if;
 
   insert into public.purchase_payments
     (user_id, po_id, amount, currency, paid_at, method, voucher_no, payer_id, note)
@@ -1816,6 +2002,9 @@ begin
   if not found then raise exception '采购单不存在'; end if;
   if po.status = 'cancelled' then
     raise exception '已取消的采购单不能入库';
+  end if;
+  if po.approval_status = 'rejected' then
+    raise exception '采购单已被财务驳回，请先修改并重新提交审核';
   end if;
 
   v_wh := coalesce(nullif(btrim(coalesce(p_warehouse, '')), ''), po.warehouse, '国内仓');
@@ -2264,7 +2453,8 @@ grant select, insert, update, delete on
   public.inventory, public.campaigns, public.creators, public.tasks, public.expenses,
   public.competitors, public.competitor_snapshots,
   public.suppliers, public.supplier_products, public.supplier_contacts,
-  public.purchase_orders, public.purchase_items,
+  public.purchase_orders, public.purchase_items, public.purchase_approvals,
+  public.dev_projects, public.dev_milestones, public.dev_costs,
   public.brand_social_accounts, public.brand_influencers,
   public.brand_pr_contacts, public.brand_metrics,
   public.departments, public.positions, public.roles,
@@ -2286,6 +2476,8 @@ grant execute on function public.bump_inventory(uuid, uuid, text, text, integer,
 grant execute on function public.fulfill_order(uuid, text, boolean)          to authenticated;
 grant execute on function public.restore_order_stock(uuid)                   to authenticated;
 grant execute on function public.po_total(uuid)                              to authenticated;
+grant execute on function public.submit_purchase(uuid, text)                         to authenticated;
+grant execute on function public.approve_purchase(uuid, text, text)                  to authenticated;
 grant execute on function public.register_payment(uuid, numeric, date, text, text, text) to authenticated;
 grant execute on function public.receive_purchase(uuid, jsonb, text, text)   to authenticated;
 grant execute on function public.shortage_plan(uuid)                         to authenticated;
@@ -2310,7 +2502,7 @@ from (values
          'ads.view','ads.edit','creators.view','creators.edit',
          'competitors.view','competitors.edit','tasks.view','tasks.edit',
          'performance.view','performance.edit','hr.view',
-         'brand.view','brand.edit']::text[]),
+         'brand.view','brand.edit','dev.view','dev.edit']::text[]),
   ('人力资源部', 'HR',      '招聘入离职、花名册与绩效管理',      1,
    array['hr.view','hr.manage',
          'performance.view','performance.edit','tasks.view','tasks.edit']::text[]),
@@ -2376,7 +2568,8 @@ from (values
   ('高级运营',   'P5', '负责多店铺运营策略与团队协作',   2),
   ('广告投手',   'P4', '负责广告投放与 ACOS 优化',       3),
   ('达人BD',     'P4', '负责达人建联、寄样与内容跟进',   4),
-  ('财务专员',   'P4', '负责利润核算与费用台账',         5)
+  ('财务专员',   'P4', '负责利润核算与费用台账',         5),
+  ('产品开发专员', 'P4', '负责自有品牌新品立项与打样跟进', 6)
 ) as v(name, level, description, sort_order)
 where not exists (select 1 from public.positions);
 
@@ -2409,6 +2602,18 @@ select '人力资源专员', '办理入职离职、维护花名册、录入绩�
              'tasks.view','tasks.edit']::text[], true, 6
  where not exists (select 1 from public.roles where name = '人力资源专员');
 
+-- 财务审核员：只审采购单与付款条件，不直接改采购业务单据
+insert into public.roles (name, description, permissions, is_system, sort_order)
+select '财务审核员', '审核采购单金额与付款条件，通过后才能登记付款',
+       array['finance.audit','purchase.view','profit.view','orders.view','products.view']::text[], true, 7
+ where not exists (select 1 from public.roles where name = '财务审核员');
+
+-- 产品开发专员：自有品牌新品从立项到上市的跟进
+insert into public.roles (name, description, permissions, is_system, sort_order)
+select '产品开发专员', '自有品牌新品立项、打样、测试与上市跟进',
+       array['dev.view','dev.edit','products.view','tasks.view','tasks.edit','purchase.view','brand.view']::text[], true, 8
+ where not exists (select 1 from public.roles where name = '产品开发专员');
+
 -- 新增模块的权限补齐：内置角色只在表为空时插入，
 -- 老库重跑脚本时不会重新生成，这里按「缺什么补什么」的方式补上，
 -- 已经存在的权限码不会重复，也不会覆盖管理员手工调整过的其他权限。
@@ -2427,7 +2632,12 @@ begin
       ('运营专员',   'performance.view'), ('财务核算', 'performance.view'),
       ('只读观察员', 'performance.view'),
       ('内容达人',   'brand.view'), ('内容达人',   'brand.edit'),
-      ('只读观察员', 'brand.view')
+      ('只读观察员', 'brand.view'),
+      ('财务核算',   'finance.audit'),
+      ('财务审核员', 'finance.audit'), ('财务审核员', 'purchase.view'),
+      ('运营专员',   'dev.view'), ('运营专员', 'dev.edit'),
+      ('产品开发专员', 'dev.view'), ('产品开发专员', 'dev.edit'),
+      ('只读观察员', 'dev.view')
     ) as v(role_name, code)
   loop
     update public.roles
@@ -2437,11 +2647,14 @@ begin
        and not (rec.code = any(permissions));
   end loop;
 
-  -- 老库部门范围补齐：信息中心与内容营销部自动获得站外品牌营销权限
+  -- 老库部门范围补齐：品牌营销、产品开发、财务审核按「缺什么补什么」追加
   for rec in
     select * from (values
       ('信息中心',   'brand.view'), ('信息中心',   'brand.edit'),
-      ('内容营销部', 'brand.view'), ('内容营销部', 'brand.edit')
+      ('内容营销部', 'brand.view'), ('内容营销部', 'brand.edit'),
+      ('信息中心',   'dev.view'), ('信息中心',   'dev.edit'),
+      ('运营部',     'dev.view'), ('运营部',     'dev.edit'),
+      ('财务部',     'finance.audit')
     ) as v(dept_name, code)
   loop
     update public.departments

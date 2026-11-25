@@ -19,6 +19,7 @@ import Ads from './pages/Ads'
 import Creators from './pages/Creators'
 import Competitors from './pages/Competitors'
 import Brand from './pages/Brand'
+import Development from './pages/Development'
 import Profit from './pages/Profit'
 import Tasks from './pages/Tasks'
 import Accounts from './pages/Accounts'
@@ -149,6 +150,7 @@ function AppRoutes() {
         <Route index element={<Dashboard />} />
         <Route path="stores" element={<RequirePermission perm="stores.view"><Stores /></RequirePermission>} />
         <Route path="products" element={<RequirePermission perm="products.view"><Products /></RequirePermission>} />
+        <Route path="development" element={<RequirePermission perm="dev.view"><Development /></RequirePermission>} />
         <Route path="orders" element={<RequirePermission perm="orders.view"><Orders /></RequirePermission>} />
         <Route path="inventory" element={<RequirePermission perm="inventory.view"><Inventory /></RequirePermission>} />
         <Route path="purchase" element={<RequirePermission perm="purchase.view"><Procurement /></RequirePermission>} />
