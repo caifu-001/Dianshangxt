@@ -1,7 +1,20 @@
 import { supabase } from './supabase'
+import { reportClientError } from './errorReporter'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const db = () => supabase as any
+
+/** 把接口失败记入系统日志，供超管排查。RLS 拒绝属于「越权拦截」，单独标记。 */
+function reportDbFailure(message: string): void {
+  const denied = /row-level security policy|permission denied/i.test(message)
+  const missing = /relation .* does not exist|could not find the table|could not find the function/i.test(message)
+  if (missing) return // 初始化未完成时刷屏没有排查价值
+  reportClientError(
+    denied ? 'permission_denied' : 'api_error',
+    `${denied ? '越权操作拦截' : '接口调用失败'}：${message.slice(0, 300)}`,
+    { raw: message.slice(0, 600) },
+  )
+}
 
 /**
  * 把数据库层的原始报错翻成人话。
@@ -9,6 +22,7 @@ const db = () => supabase as any
  * 用户看到这句话完全不知道该怎么办。
  */
 function translateDbError(message: string): string {
+  reportDbFailure(message)
   if (/row-level security policy/i.test(message)) {
     return '你的岗位角色没有该操作的权限，请联系管理员在「人员与账号」中调整角色'
   }

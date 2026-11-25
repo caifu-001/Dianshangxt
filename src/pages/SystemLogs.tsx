@@ -19,6 +19,7 @@ interface SystemLog {
   id: string
   created_at: string
   company_id: string | null
+  company_name: string | null
   actor_id: string | null
   actor_email: string | null
   actor_name: string | null
@@ -55,6 +56,9 @@ const ACTION_LABELS: Record<string, string> = {
   member_move: '成员跨公司调配',
   registration_approve: '公司入驻通过',
   registration_reject: '公司入驻驳回',
+  client_error: '前端运行异常',
+  api_error: '接口调用失败',
+  permission_denied: '越权操作拦截',
 }
 
 const CATEGORY_OPTIONS = [
@@ -80,13 +84,25 @@ function severityTone(severity: string): 'gray' | 'amber' | 'red' {
 }
 
 /** 平台超级管理员专属：全站审计日志，只读 */
+interface CompanyOption { id: string; name: string }
+
 export default function SystemLogs() {
   const [category, setCategory] = useState('')
   const [severity, setSeverity] = useState('')
+  const [company, setCompany] = useState('')
   const [query, setQuery] = useState('')
   const [limit, setLimit] = useState('100')
   const [detail, setDetail] = useState<SystemLog | null>(null)
   const search = useDebounced(query, 350)
+
+  const companies = useAsync<CompanyOption[]>(
+    () => callRpc<CompanyOption[]>('list_companies'),
+    [],
+  )
+  const companyOptions = [
+    { value: '', label: '全部公司' },
+    ...(companies.data ?? []).map((c) => ({ value: c.id, label: c.name })),
+  ]
 
   const { data, loading, error, reload } = useAsync<SystemLog[]>(
     () =>
@@ -95,8 +111,9 @@ export default function SystemLogs() {
         p_category: category || null,
         p_severity: severity || null,
         p_search: search.trim() || null,
+        p_company: company || null,
       }),
-    [category, severity, search, limit],
+    [category, severity, company, search, limit],
   )
 
   const rows = data ?? []
@@ -105,7 +122,7 @@ export default function SystemLogs() {
     <>
       <PageHeader
         title="系统日志"
-        description="全站关键操作的只读审计轨迹，仅平台超级管理员可见"
+        description="全平台所有公司的关键操作与异常记录，仅平台超级管理员可见，可用于排查故障"
         actions={
           <Button size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />} onClick={reload}>
             刷新
@@ -121,6 +138,7 @@ export default function SystemLogs() {
             placeholder="搜索操作 / 姓名 / 邮箱…"
             className="w-56"
           />
+          <Select value={company} onChange={setCompany} options={companyOptions} placeholder="全部公司" className="w-32" />
           <Select value={category} onChange={setCategory} options={CATEGORY_OPTIONS} placeholder="全部类别" className="w-28" />
           <Select value={severity} onChange={setSeverity} options={SEVERITY_OPTIONS} placeholder="全部级别" className="w-28" />
           <Select
@@ -149,6 +167,7 @@ export default function SystemLogs() {
               <thead>
                 <tr className="text-left text-ink-400 text-[11px] uppercase tracking-wide border-b border-ink-100">
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">时间</th>
+                  <th className="px-4 py-2.5 font-medium whitespace-nowrap">来源公司</th>
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">类别</th>
                   <th className="px-4 py-2.5 font-medium whitespace-nowrap">操作人</th>
                   <th className="px-4 py-2.5 font-medium">事件</th>
@@ -166,6 +185,9 @@ export default function SystemLogs() {
                     >
                       <td className="px-4 py-2.5 whitespace-nowrap text-ink-500 tabular-nums">
                         {dayjs(row.created_at).format('MM-DD HH:mm:ss')}
+                      </td>
+                      <td className="px-4 py-2.5 whitespace-nowrap text-ink-600">
+                        {row.company_name || '平台'}
                       </td>
                       <td className="px-4 py-2.5 whitespace-nowrap">
                         <Badge tone={meta.tone}>{meta.label}</Badge>
@@ -196,7 +218,7 @@ export default function SystemLogs() {
 
       <p className="mt-3 flex items-center gap-1.5 text-[11.5px] text-ink-400">
         <Activity className="w-3.5 h-3.5" />
-        登录与安全类事件自动留痕；日志只读，任何账号都无法修改或删除。
+        登录、权限变更、公司操作及前端异常均自动留痕；日志只读，任何账号都无法修改或删除。
       </p>
 
       <Modal
@@ -208,6 +230,10 @@ export default function SystemLogs() {
         {detail && (
           <div className="space-y-3 text-[13px]">
             <div className="grid grid-cols-2 gap-3">
+              <div>
+                <p className="text-[11px] text-ink-400">来源公司</p>
+                <p className="mt-0.5 text-ink-800">{detail.company_name || '平台'}</p>
+              </div>
               <div>
                 <p className="text-[11px] text-ink-400">类别</p>
                 <p className="mt-0.5 text-ink-800">{CATEGORY_META[detail.category]?.label ?? detail.category}</p>

@@ -1434,7 +1434,9 @@ $$;
 -- 写系统日志：任何登录用户都能记自己的操作（如登录 / 登出），
 -- 但 actor 身份一律取自 auth.uid()，前端传什么都伪造不了别人。
 -- 日志表本身不给 authenticated 任何写权限，全部经这个 security definer 函数落库。
-create or replace function public.log_system_event(
+-- 内部写入口：数据库函数 / 触发器专用，允许记录所有类别（含安全 / 公司 / 账号）。
+-- 不授权给 authenticated，前端无法直接调用，因此无法伪造安全事件。
+create or replace function public.record_system_event(
   p_category   text,
   p_action     text,
   p_summary    text,
@@ -1463,12 +1465,6 @@ begin
     v_company := public.current_company_id();
   end if;
 
-  -- 普通账号只能由前端记自己的登录 / 退出；其他类别由数据库函数与触发器写入，
-  -- 防止有人伪造「安全事件」污染审计轨迹
-  if not public.is_super_admin() and p_category <> 'auth' then
-    return;
-  end if;
-
   insert into public.system_logs
     (company_id, actor_id, actor_email, actor_name, category, action, summary, detail, target_type, target_id, severity)
   values
@@ -1483,27 +1479,57 @@ begin
 end;
 $$;
 
+-- 前端上报口：普通账号可为自己的操作留痕（登录 / 业务 / 错误），
+-- 但安全 / 公司 / 账号类事件只允许数据库内部函数写入，防止伪造审计轨迹。
+-- actor 始终取 auth.uid()，调用方冒充不了别人。
+create or replace function public.log_system_event(
+  p_category   text,
+  p_action     text,
+  p_summary    text,
+  p_detail     jsonb default '{}'::jsonb,
+  p_target_type text default null,
+  p_target_id  text default null,
+  p_severity   text default 'info'
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    return;
+  end if;
+  if p_category in ('auth','business','error') then
+    perform public.record_system_event(
+      p_category, p_action, p_summary, p_detail, p_target_type, p_target_id, p_severity);
+  end if;
+end;
+$$;
+
 -- 读系统日志：只有平台超管能拿到任何行，其余账号查不到（security definer 绕过 RLS 后自行校验）
 create or replace function public.list_system_logs(
   p_limit   integer default 100,
   p_category text default null,
   p_severity text default null,
-  p_search  text default null
+  p_search  text default null,
+  p_company uuid default null
 )
 returns table (
-  id uuid, created_at timestamptz, company_id uuid,
+  id uuid, created_at timestamptz, company_id uuid, company_name text,
   actor_id uuid, actor_email text, actor_name text,
   category text, action text, summary text, detail jsonb,
   target_type text, target_id text, severity text
 )
 language sql stable security definer set search_path = public
 as $$
-  select l.id, l.created_at, l.company_id, l.actor_id, l.actor_email, l.actor_name,
+  select l.id, l.created_at, l.company_id,
+         (select c.name from public.companies c where c.id = l.company_id) as company_name,
+         l.actor_id, l.actor_email, l.actor_name,
          l.category, l.action, l.summary, l.detail, l.target_type, l.target_id, l.severity
     from public.system_logs l
    where public.is_super_admin()
      and (p_category is null or l.category = p_category)
      and (p_severity is null or l.severity = p_severity)
+     and (p_company is null or l.company_id = p_company)
      and (p_search is null or p_search = ''
           or l.summary ilike '%' || p_search || '%'
           or coalesce(l.actor_email,'') ilike '%' || p_search || '%'
@@ -1524,20 +1550,20 @@ begin
   end if;
 
   if new.role is distinct from old.role then
-    perform public.log_system_event('security', 'role_change',
+    perform public.record_system_event('security', 'role_change',
       '系统角色 ' || coalesce(old.role,'') || ' → ' || coalesce(new.role,''),
       jsonb_build_object('target', new.email, 'from', old.role, 'to', new.role),
       'profiles', new.id::text,
       case when new.role = 'super_admin' then 'warning' else 'info' end);
   end if;
   if new.status is distinct from old.status then
-    perform public.log_system_event('security', 'status_change',
+    perform public.record_system_event('security', 'status_change',
       '账号状态 ' || coalesce(old.status,'') || ' → ' || coalesce(new.status,''),
       jsonb_build_object('target', new.email, 'from', old.status, 'to', new.status),
       'profiles', new.id::text, 'warning');
   end if;
   if new.company_id is distinct from old.company_id then
-    perform public.log_system_event('security', 'company_change',
+    perform public.record_system_event('security', 'company_change',
       '成员公司归属调整',
       jsonb_build_object('target', new.email, 'from', old.company_id, 'to', new.company_id),
       'profiles', new.id::text, 'warning');
@@ -1598,7 +1624,7 @@ begin
   insert into public.companies (name, code, note)
   values (trim(p_name), nullif(trim(coalesce(p_code, '')), ''), p_note)
   returning id into v_id;
-  perform public.log_system_event('company', 'company_create',
+  perform public.record_system_event('company', 'company_create',
     '创建公司「' || trim(p_name) || '」',
     jsonb_build_object('company_id', v_id, 'code', p_code),
     'companies', v_id::text);
@@ -1710,7 +1736,7 @@ begin
   update public.company_registrations
      set status = 'approved', reviewed_by = auth.uid(), reviewed_at = now(), company_id = v_company
    where id = p_id;
-  perform public.log_system_event('company', 'registration_approve',
+  perform public.record_system_event('company', 'registration_approve',
     '通过「' || r.company_name || '」的入驻申请',
     jsonb_build_object('applicant', r.applicant_email, 'company_id', v_company),
     'company_registrations', p_id::text);
@@ -1736,7 +1762,7 @@ begin
   update public.company_registrations
      set status = 'rejected', reviewed_by = auth.uid(), reviewed_at = now(), reject_reason = p_reason
    where id = p_id;
-  perform public.log_system_event('company', 'registration_reject',
+  perform public.record_system_event('company', 'registration_reject',
     '驳回「' || r.company_name || '」的入驻申请',
     jsonb_build_object('applicant', r.applicant_email, 'reason', p_reason),
     'company_registrations', p_id::text);
@@ -1761,7 +1787,7 @@ begin
          status = p_status,
          note = p_note
    where id = p_id;
-  perform public.log_system_event('company', 'company_update',
+  perform public.record_system_event('company', 'company_update',
     '更新公司「' || trim(p_name) || '」',
     jsonb_build_object('company_id', p_id, 'status', p_status),
     'companies', p_id::text);
@@ -1780,7 +1806,7 @@ begin
     raise exception '公司不存在或已停用';
   end if;
   update public.profiles set active_company_id = p_company where id = auth.uid();
-  perform public.log_system_event('company', 'company_switch',
+  perform public.record_system_event('company', 'company_switch',
     '切换管理视角到公司 ' || p_company::text,
     jsonb_build_object('company_id', p_company),
     'companies', p_company::text);
@@ -1880,7 +1906,7 @@ begin
   end loop;
 
   if v_moved > 0 then
-    perform public.log_system_event('company', 'member_move',
+    perform public.record_system_event('company', 'member_move',
       '批量调配 ' || v_moved || ' 名成员到公司「' || v_target.name || '」',
       jsonb_build_object('count', v_moved, 'company_id', p_company, 'members', p_members),
       'companies', p_company::text, 'warning');
@@ -3838,7 +3864,10 @@ grant select, insert, update, delete on
 -- 系统日志：表只给 select（且被 RLS 收窄到超管），写全部走 log_system_event 函数
 grant select on public.system_logs to authenticated;
 grant execute on function public.log_system_event(text, text, text, jsonb, text, text, text) to authenticated;
-grant execute on function public.list_system_logs(integer, text, text, text) to authenticated;
+-- 内部写入函数只供数据库函数 / 触发器调用，不授权给任何前端账号：
+-- 初始授权撤销后，仅 security definer 的函数内部（以所有者身份）还能写入。
+revoke all on function public.record_system_event(text, text, text, jsonb, text, text, text) from public, anon, authenticated;
+grant execute on function public.list_system_logs(integer, text, text, text, uuid) to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
 grant execute on function public.offboard_member(uuid, uuid, text) to authenticated;
