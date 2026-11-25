@@ -282,6 +282,53 @@ create table if not exists public.expenses (
 create index if not exists idx_expenses_user on public.expenses(user_id);
 create index if not exists idx_expenses_date on public.expenses(expense_date desc);
 
+-- -------------------------------------------------------------
+-- 10. 组织架构：部门 / 岗位 / 自定义角色
+--     departments 支持无限层级（parent_id 自引用），岗位挂在部门下，
+--     roles.permissions 存权限码，决定该角色能看到哪些模块、能否删除。
+-- -------------------------------------------------------------
+create table if not exists public.departments (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  parent_id   uuid references public.departments(id) on delete set null,
+  leader_id   uuid references public.profiles(id) on delete set null,
+  description text,
+  sort_order  integer not null default 0,
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_departments_parent on public.departments(parent_id);
+
+create table if not exists public.positions (
+  id            uuid primary key default gen_random_uuid(),
+  name          text not null,
+  department_id uuid references public.departments(id) on delete set null,
+  level         text not null default 'P1',   -- 职级：P1-P8 / M1-M4 等，用户可自定义
+  description   text,
+  sort_order    integer not null default 0,
+  created_at    timestamptz not null default now()
+);
+create index if not exists idx_positions_dept on public.positions(department_id);
+
+create table if not exists public.roles (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  description text,
+  permissions text[] not null default '{}',   -- 权限码，见 lib/permissions.ts
+  is_system   boolean not null default false, -- 内置角色：不可删除，可改权限
+  sort_order  integer not null default 0,
+  created_at  timestamptz not null default now()
+);
+create unique index if not exists uq_roles_name on public.roles (name);
+
+-- 成员与组织的关系（删岗位/部门时置空，不影响账号本身）
+alter table public.profiles add column if not exists department_id uuid references public.departments(id) on delete set null;
+alter table public.profiles add column if not exists position_id   uuid references public.positions(id)   on delete set null;
+alter table public.profiles add column if not exists role_id       uuid references public.roles(id)       on delete set null;
+
+create index if not exists idx_profiles_department on public.profiles(department_id);
+create index if not exists idx_profiles_position   on public.profiles(position_id);
+create index if not exists idx_profiles_role_id    on public.profiles(role_id);
+
 -- =============================================================
 --  行级安全（RLS）与角色权限
 --  权限模型：团队共享同一份业务数据，按角色控制「可删 / 可管人」
@@ -330,12 +377,46 @@ as $$
   );
 $$;
 
+-- 权限判定：模块级权限码（stores.view / orders.edit / data.delete ...）
+-- 三层收敛，缺一不可：
+--   1) 账号必须 active
+--   2) 系统角色给出「上限」：member 永远拿不到管理类权限
+--   3) 自定义角色（roles.permissions）给出「范围」：没配角色时按角色默认值放行
+-- 管理类权限（管人 / 管组织 / 管系统配置）不受自定义角色收窄，
+-- 否则管理员很容易把自己锁在门外。
+create or replace function public.has_permission(code text)
+returns boolean
+language sql stable security definer set search_path = public
+as $$
+  select coalesce((
+    select case
+      when coalesce(p.status, 'active') <> 'active' then false
+      when p.role = 'super_admin' then true
+      -- 管理类：只有系统角色管理员及以上可以，自定义角色无法授予或剥夺
+      when code in ('account.manage', 'org.manage', 'system.manage') then p.role = 'admin'
+      -- 未分配自定义角色：按系统角色默认值
+      when p.role_id is null then
+        case when p.role = 'admin' then true
+             else code like '%.view' or code like '%.edit'
+        end
+      -- 已分配自定义角色：必须在角色权限内，且不能突破系统角色上限
+      else
+        coalesce(code = any(coalesce(r.permissions, '{}')), false)
+        and (p.role = 'admin' or code like '%.view' or code like '%.edit')
+    end
+    from public.profiles p
+    left join public.roles r on r.id = p.role_id
+    where p.id = auth.uid()
+  ), false);
+$$;
+
 do $do$
 declare
   t text;
   tabs text[] := array[
     'profiles','stores','products','orders','inventory',
-    'campaigns','creators','tasks','expenses'
+    'campaigns','creators','tasks','expenses',
+    'departments','positions','roles'
   ];
 begin
   foreach t in array tabs loop
@@ -353,12 +434,16 @@ drop policy if exists "profiles_update_self"  on public.profiles;
 drop policy if exists "profiles_update_staff" on public.profiles;
 drop policy if exists "profiles_delete_super" on public.profiles;
 
--- 本人可见自己；管理员可见全部（账号管理页需要）
+-- 本人可见自己；管人或管组织的人可见全部（账号管理页 / 组织架构页需要）
 create policy "profiles_select" on public.profiles
   for select to authenticated
-  using (id = auth.uid() or public.is_staff());
+  using (
+    id = auth.uid()
+    or public.has_permission('account.manage')
+    or public.has_permission('org.manage')
+  );
 
--- 本人可改自己的资料（角色/状态由触发器拦截，不能自提权）
+-- 本人可改自己的资料（角色 / 状态 / 组织归属由触发器拦截，不能自提权）
 create policy "profiles_update_self" on public.profiles
   for update to authenticated
   using (id = auth.uid())
@@ -376,39 +461,93 @@ create policy "profiles_delete_super" on public.profiles
   using (public.is_super_admin() and id <> auth.uid());
 
 -- ---------- 业务表 ----------
--- 读 / 写：所有在职成员；删除：仅管理员
+-- 读：{模块}.view / 写：{模块}.edit / 删：data.delete
+-- 表与权限模块的映射：广告活动归到 ads，费用台账归到 profit
 do $do$
 declare
-  t text;
-  tabs text[] := array['stores','products','orders','inventory','campaigns','creators','tasks','expenses'];
+  rec record;
 begin
-  foreach t in array tabs loop
+  for rec in
+    select * from (values
+      ('stores',    'stores'),
+      ('products',  'products'),
+      ('orders',    'orders'),
+      ('inventory', 'inventory'),
+      ('campaigns', 'ads'),
+      ('creators',  'creators'),
+      ('tasks',     'tasks'),
+      ('expenses',  'profit')
+    ) as v(tbl, perm)
+  loop
     -- 清理历史策略（旧版为 xxx_owner_all，按 user_id 隔离）
-    execute format('drop policy if exists %I on public.%I', t || '_owner_all', t);
-    execute format('drop policy if exists %I on public.%I', t || '_select',    t);
-    execute format('drop policy if exists %I on public.%I', t || '_insert',    t);
-    execute format('drop policy if exists %I on public.%I', t || '_update',    t);
-    execute format('drop policy if exists %I on public.%I', t || '_delete',    t);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_owner_all', rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_select',    rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_insert',    rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_update',    rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_delete',    rec.tbl);
 
     execute format(
-      'create policy %I on public.%I for select to authenticated using (public.is_active_user())',
-      t || '_select', t
+      'create policy %I on public.%I for select to authenticated using (public.has_permission(%L))',
+      rec.tbl || '_select', rec.tbl, rec.perm || '.view'
     );
     execute format(
-      'create policy %I on public.%I for insert to authenticated with check (public.is_active_user())',
-      t || '_insert', t
+      'create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L))',
+      rec.tbl || '_insert', rec.tbl, rec.perm || '.edit'
     );
     execute format(
-      'create policy %I on public.%I for update to authenticated using (public.is_active_user()) with check (public.is_active_user())',
-      t || '_update', t
+      'create policy %I on public.%I for update to authenticated using (public.has_permission(%L)) with check (public.has_permission(%L))',
+      rec.tbl || '_update', rec.tbl, rec.perm || '.edit', rec.perm || '.edit'
     );
     execute format(
-      'create policy %I on public.%I for delete to authenticated using (public.is_staff())',
-      t || '_delete', t
+      'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L))',
+      rec.tbl || '_delete', rec.tbl, 'data.delete'
     );
   end loop;
 end;
 $do$;
+
+-- ---------- 组织架构（部门 / 岗位 / 角色） ----------
+-- 全员可读（通讯录、成员列表要显示部门与岗位名），写需要 org.manage
+do $do$
+declare
+  t text;
+  tabs text[] := array['departments', 'positions'];
+begin
+  foreach t in array tabs loop
+    execute format('drop policy if exists %I on public.%I', t || '_select', t);
+    execute format('drop policy if exists %I on public.%I', t || '_insert', t);
+    execute format('drop policy if exists %I on public.%I', t || '_update', t);
+    execute format('drop policy if exists %I on public.%I', t || '_delete', t);
+
+    execute format('create policy %I on public.%I for select to authenticated using (public.is_active_user())',
+      t || '_select', t);
+    execute format('create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L))',
+      t || '_insert', t, 'org.manage');
+    execute format('create policy %I on public.%I for update to authenticated using (public.has_permission(%L)) with check (public.has_permission(%L))',
+      t || '_update', t, 'org.manage', 'org.manage');
+    execute format('create policy %I on public.%I for delete to authenticated using (public.has_permission(%L))',
+      t || '_delete', t, 'org.manage');
+  end loop;
+end;
+$do$;
+
+drop policy if exists "roles_select" on public.roles;
+drop policy if exists "roles_insert" on public.roles;
+drop policy if exists "roles_update" on public.roles;
+drop policy if exists "roles_delete" on public.roles;
+
+create policy "roles_select" on public.roles
+  for select to authenticated using (public.is_active_user());
+create policy "roles_insert" on public.roles
+  for insert to authenticated with check (public.has_permission('org.manage'));
+create policy "roles_update" on public.roles
+  for update to authenticated
+  using (public.has_permission('org.manage'))
+  with check (public.has_permission('org.manage'));
+-- 内置角色（is_system）不允许删除，避免误删后权限矩阵出现空洞
+create policy "roles_delete" on public.roles
+  for delete to authenticated
+  using (public.has_permission('org.manage') and not is_system);
 
 -- ---------- 角色变更守卫：防止普通成员给自己提权 ----------
 create or replace function public.guard_profile_changes()
@@ -440,6 +579,16 @@ begin
     end if;
   end if;
 
+  -- 组织归属（部门 / 岗位 / 自定义角色）同样只能由管理员调整：
+  -- 否则普通成员可以给自己挂一个全权限角色，绕过整条权限链
+  if new.role_id       is distinct from old.role_id
+     or new.department_id is distinct from old.department_id
+     or new.position_id   is distinct from old.position_id then
+    if not public.is_staff() then
+      raise exception '无权修改部门、岗位或自定义角色，请联系管理员';
+    end if;
+  end if;
+
   return new;
 end;
 $$;
@@ -463,8 +612,53 @@ create unique index if not exists uq_orders_no on public.orders(store_id, order_
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on
   public.profiles, public.stores, public.products, public.orders,
-  public.inventory, public.campaigns, public.creators, public.tasks, public.expenses
+  public.inventory, public.campaigns, public.creators, public.tasks, public.expenses,
+  public.departments, public.positions, public.roles
   to authenticated;
+
+-- -------------------------------------------------------------
+-- 默认组织数据（仅当表为空时写入，不会覆盖你已有的配置）
+-- -------------------------------------------------------------
+insert into public.departments (name, description, sort_order)
+select v.name, v.description, v.sort_order
+from (values
+  ('运营部',     '店铺日常运营、Listing 与库存周转', 1),
+  ('广告投放部', '站内广告与站外投放',             2),
+  ('内容营销部', '达人合作、短视频与直播',         3),
+  ('财务部',     '利润核算、费用与税务',           4)
+) as v(name, description, sort_order)
+where not exists (select 1 from public.departments);
+
+insert into public.positions (name, level, description, sort_order)
+select v.name, v.level, v.description, v.sort_order
+from (values
+  ('运营专员',   'P3', '负责店铺日常运营与 Listing 优化', 1),
+  ('高级运营',   'P5', '负责多店铺运营策略与团队协作',   2),
+  ('广告投手',   'P4', '负责广告投放与 ACOS 优化',       3),
+  ('达人BD',     'P4', '负责达人建联、寄样与内容跟进',   4),
+  ('财务专员',   'P4', '负责利润核算与费用台账',         5)
+) as v(name, level, description, sort_order)
+where not exists (select 1 from public.positions);
+
+-- 内置角色：覆盖跨境电商团队最常见的四种分工，可改权限、不可删除
+insert into public.roles (name, description, permissions, is_system, sort_order)
+select v.name, v.description, v.permissions, true, v.sort_order
+from (values
+  ('运营专员', '店铺、商品、订单、库存与任务的全流程操作',
+   array['stores.view','stores.edit','products.view','products.edit',
+         'orders.view','orders.edit','inventory.view','inventory.edit',
+         'tasks.view','tasks.edit']::text[], 1),
+  ('广告投手', '广告活动与商品数据，不接触订单与财务',
+   array['ads.view','ads.edit','products.view','tasks.view']::text[], 2),
+  ('内容达人', '达人建联与内容合作，可查看到商品与任务',
+   array['creators.view','creators.edit','products.view','tasks.view','tasks.edit']::text[], 3),
+  ('财务核算', '订单与利润只读，可维护费用台账，不能改动业务单据',
+   array['profit.view','profit.edit','orders.view','stores.view','products.view']::text[], 4),
+  ('只读观察员', '全部业务模块只读，适合老板或外部顾问',
+   array['stores.view','products.view','orders.view','inventory.view',
+         'ads.view','creators.view','profit.view','tasks.view']::text[], 5)
+) as v(name, description, permissions, sort_order)
+where not exists (select 1 from public.roles);
 
 -- 历史数据里若还没有超级管理员，把最早注册的账号提升上来，避免没人能管账号
 select public.ensure_super_admin();
@@ -472,5 +666,5 @@ select public.ensure_super_admin();
 -- =============================================================
 --  完成。接下来回到应用：登录 → 系统会自动检测并进入工作台。
 --  第一个注册的账号自动成为「超级管理员」，其余新注册账号为「普通人员」，
---  由超级管理员在「账号管理」页调整角色。
+--  由超级管理员在「账号管理」页调整角色，在「组织架构」页维护部门 / 岗位 / 自定义角色。
 -- =============================================================

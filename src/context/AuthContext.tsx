@@ -3,8 +3,15 @@ import type { ReactNode } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import { checkSchema, fetchRows } from '../lib/db'
-import type { Profile } from '../lib/types'
-import { type Role, isStaff as checkStaff, isSuperAdmin as checkSuper, normalizeRole } from '../lib/permissions'
+import type { Profile, RoleDef } from '../lib/types'
+import {
+  type PermissionCode,
+  type Role,
+  effectivePermissions,
+  isStaff as checkStaff,
+  isSuperAdmin as checkSuper,
+  normalizeRole,
+} from '../lib/permissions'
 
 interface AuthContextValue {
   session: Session | null
@@ -13,10 +20,16 @@ interface AuthContextValue {
   loading: boolean
   schemaReady: boolean
   schemaMessage: string | null
-  /** 当前账号角色（super_admin / admin / member） */
+  /** 当前账号的系统角色（super_admin / admin / member） */
   role: Role
   isStaff: boolean
   isSuperAdmin: boolean
+  /** 有效权限码（系统角色上限 ∩ 自定义角色范围） */
+  permissions: PermissionCode[]
+  /** 权限判定，界面可见性统一走这里 */
+  can: (code: PermissionCode) => boolean
+  /** 分配的自定义角色（岗位角色），未分配为 null */
+  customRole: RoleDef | null
   /** 账号被禁用或档案被移除时非空，用于阻断进入工作台 */
   blocked: 'disabled' | 'missing' | null
   recheckSchema: () => Promise<boolean>
@@ -41,6 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [schemaReady, setSchemaReady] = useState(true)
   const [schemaMessage, setSchemaMessage] = useState<string | null>(null)
   const [blocked, setBlocked] = useState<'disabled' | 'missing' | null>(null)
+  const [roles, setRoles] = useState<RoleDef[]>([])
 
   const loadProfile = useCallback(async (userId: string) => {
     try {
@@ -53,6 +67,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       else setBlocked(null)
     } catch {
       setProfile(null)
+    }
+  }, [])
+
+  // 自定义角色表：全员可读，用于把 profile.role_id 解析成具体权限
+  const loadRoles = useCallback(async () => {
+    try {
+      const rows = await fetchRows<RoleDef>('roles', { order: { column: 'sort_order' } })
+      setRoles(rows)
+    } catch {
+      // 旧版数据库还没有 roles 表，退回「按系统角色默认权限」
+      setRoles([])
     }
   }, [])
 
@@ -72,6 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (data.session?.user) {
         await recheckSchema()
         await loadProfile(data.session.user.id)
+        void loadRoles()
       }
       setLoading(false)
     })
@@ -90,7 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       active = false
       sub.subscription.unsubscribe()
     }
-  }, [loadProfile, recheckSchema])
+  }, [loadProfile, recheckSchema, loadRoles])
 
   const signIn = useCallback(async (email: string, password: string) => {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password })
@@ -161,11 +187,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setBlocked(null)
   }, [])
   const refreshProfile = useCallback(async () => {
-    if (session?.user) await loadProfile(session.user.id)
-  }, [loadProfile, session?.user])
+    if (session?.user) {
+      await loadProfile(session.user.id)
+      await loadRoles()
+    }
+  }, [loadProfile, loadRoles, session?.user])
+
+  const role: Role = normalizeRole(profile?.role)
+  const customRole = useMemo(
+    () => (profile?.role_id ? roles.find((r) => r.id === profile.role_id) ?? null : null),
+    [profile?.role_id, roles],
+  )
+  // 有 role_id 但查不到对应角色（角色被删）时按「无权限」处理，避免意外放大权限
+  const permissions = useMemo(() => {
+    const rolePerms: string[] | null = profile?.role_id ? (customRole?.permissions ?? []) : null
+    return effectivePermissions(role, rolePerms)
+  }, [role, profile?.role_id, customRole])
+
+  // 删除类按钮统一按权限隐藏：页面里给按钮加 data-perm="delete" 即可，
+  // 不用每个模块各自写一遍判断。
+  useEffect(() => {
+    document.body.dataset.permDelete = permissions.includes('data.delete') ? 'true' : 'false'
+  }, [permissions])
 
   const value = useMemo<AuthContextValue>(() => {
-    const role: Role = normalizeRole(profile?.role)
+    const allowed = new Set<string>(permissions)
+
     return {
       session,
       user: session?.user ?? null,
@@ -176,6 +223,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       role,
       isStaff: checkStaff(role),
       isSuperAdmin: checkSuper(role),
+      permissions,
+      can: (code: PermissionCode) => allowed.has(code),
+      customRole,
       blocked,
       recheckSchema,
       signIn,
@@ -187,7 +237,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       refreshProfile,
     }
   }, [
-    session, profile, loading, schemaReady, schemaMessage, blocked,
+    session, profile, role, permissions, customRole, loading, schemaReady, schemaMessage, blocked,
     recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile,
   ])
 

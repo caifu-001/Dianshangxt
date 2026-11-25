@@ -1,4 +1,5 @@
-import { insertRows } from './db'
+import { fetchRows, insertRows, updateRow } from './db'
+import { supabase } from './supabase'
 import { daysAgo } from './utils'
 import type { Platform } from './types'
 
@@ -218,4 +219,31 @@ export async function seedDemoData() {
     { store_id: null, category: 'software', amount: 1299, currency: 'CNY', expense_date: daysAgo(5), remark: 'ERP + 选品工具年费' },
     { store_id: stores[2].id, category: 'sample', amount: 86, currency: 'USD', expense_date: daysAgo(3), remark: '寄样快递费' },
   ])
+
+  // 9. 组织架构（演示用）：把当前账号归到一个部门 / 岗位 / 角色上，
+  //    这样「组织架构」页不会是空的。表不存在（旧库未升级）时整体跳过。
+  try {
+    const { data: authData } = await supabase.auth.getUser()
+    const uid = authData.user?.id
+    if (!uid) return
+
+    const [depts, posList, roleList] = await Promise.all([
+      fetchRows<{ id: string; name: string }>('departments', { order: { column: 'sort_order' } }),
+      fetchRows<{ id: string; name: string }>('positions', { order: { column: 'sort_order' } }),
+      fetchRows<{ id: string; name: string }>('roles', { order: { column: 'sort_order' } }),
+    ])
+    if (!depts.length || !posList.length) return
+
+    const dept = depts.find((d) => d.name === '运营部') ?? depts[0]
+    const pos = posList.find((p) => p.name === '高级运营') ?? posList[0]
+    const role = roleList.find((r) => r.name === '运营专员') ?? null
+
+    await updateRow('profiles', uid, {
+      department_id: dept.id,
+      position_id: pos.id,
+      role_id: role?.id ?? null,
+    })
+  } catch {
+    // 组织架构表还没建：忽略，不影响业务数据的生成
+  }
 }

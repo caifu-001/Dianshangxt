@@ -40,7 +40,9 @@ const COUNTS: Array<{ table: string; label: string }> = [
 ]
 
 export default function Settings() {
-  const { user, profile, refreshProfile, schemaReady, changePassword, isStaff } = useAuth()
+  const { user, profile, refreshProfile, schemaReady, changePassword, can } = useAuth()
+  // 汇率、演示数据、清空数据属于系统级操作，由 system.manage 权限决定
+  const canManageSystem = can('system.manage')
   const { push } = useToast()
   const [fullName, setFullName] = useState('')
   const [company, setCompany] = useState('')
@@ -206,12 +208,12 @@ export default function Settings() {
     <div className="max-w-4xl mx-auto">
       <PageHeader title="系统设置" description="账号资料、数据源与演示数据管理" />
 
-      {!isStaff && (
+      {!canManageSystem && (
         <div className="rounded-xl border border-amber-200/70 bg-amber-50 px-3.5 py-2.5 mb-3 flex items-start gap-2">
           <Info className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
           <p className="text-[11.5px] leading-relaxed text-amber-800">
-            你当前是<b>普通人员</b>：可以维护自己的资料与密码，汇率、演示数据、清空数据等系统级操作需要管理员权限。
-            如需调整，请让超级管理员在「账号管理」中修改你的角色。
+            你的角色没有<b>系统配置</b>权限：可以维护自己的资料与密码，汇率、演示数据、清空数据等操作需要管理员权限。
+            如需调整，请让管理员在「账号管理」中为你调整系统角色。
           </p>
         </div>
       )}
@@ -333,7 +335,7 @@ export default function Settings() {
             ))}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Button variant="primary" size="sm" onClick={saveRates} loading={savingRates} disabled={!isStaff}>
+            <Button variant="primary" size="sm" onClick={saveRates} loading={savingRates} disabled={!canManageSystem}>
               保存汇率
             </Button>
             <Button
@@ -412,7 +414,7 @@ export default function Settings() {
                 创建 3 家店铺、11 个 SKU、近 60 天订单及广告 / 达人 / 任务数据，用于快速体验完整流程。
               </p>
             </div>
-            <Button size="sm" onClick={handleSeed} loading={seeding} disabled={!isStaff} icon={seeding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}>
+            <Button size="sm" onClick={handleSeed} loading={seeding} disabled={!canManageSystem} icon={seeding ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}>
               生成
             </Button>
           </div>
@@ -436,7 +438,7 @@ export default function Settings() {
                 删除当前账号下的店铺、商品、订单、库存、广告、达人、任务与费用记录，账号本身保留。不可恢复。
               </p>
             </div>
-            <Button size="sm" variant="danger" disabled={!isStaff} icon={<Trash2 className="w-3.5 h-3.5" />} onClick={() => setClearOpen(true)}>
+            <Button size="sm" variant="danger" disabled={!canManageSystem} icon={<Trash2 className="w-3.5 h-3.5" />} onClick={() => setClearOpen(true)}>
               清空数据
             </Button>
           </div>

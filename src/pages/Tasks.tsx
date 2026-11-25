@@ -365,7 +365,7 @@ export default function Tasks() {
                           >
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
-                          <button
+                          <button data-perm="delete"
                             className="p-1 rounded text-ink-400 hover:text-rose-600 hover:bg-rose-50"
                             onClick={(e) => { e.stopPropagation(); setDeleting(task) }}
                           >

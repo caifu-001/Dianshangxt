@@ -3,6 +3,27 @@ import { supabase } from './supabase'
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const db = () => supabase as any
 
+/**
+ * 把数据库层的原始报错翻成人话。
+ * RLS 拒绝时 PostgREST 返回的是 "new row violates row-level security policy ..."，
+ * 用户看到这句话完全不知道该怎么办。
+ */
+function translateDbError(message: string): string {
+  if (/row-level security policy/i.test(message)) {
+    return '你的岗位角色没有该操作的权限，请联系管理员在「账号管理」中调整角色'
+  }
+  if (/duplicate key value/i.test(message)) {
+    return '记录已存在（SKU / 订单号等唯一键重复）'
+  }
+  if (/null value in column/i.test(message)) {
+    return '必填字段没有填写'
+  }
+  if (/violates foreign key constraint/i.test(message)) {
+    return '关联的数据不存在，可能已被删除'
+  }
+  return message
+}
+
 export interface QueryOptions {
   order?: { column: string; ascending?: boolean }
   limit?: number
@@ -18,25 +39,25 @@ export async function fetchRows<T>(table: string, options: QueryOptions = {}): P
   if (options.order) query = query.order(options.order.column, { ascending: options.order.ascending ?? true })
   if (options.limit) query = query.limit(options.limit)
   const { data, error } = await query
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
   return (data ?? []) as T[]
 }
 
 export async function insertRow<T>(table: string, values: Record<string, unknown>): Promise<T> {
   const { data, error } = await db().from(table).insert(values).select().single()
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
   return data as T
 }
 
 export async function insertRows<T>(table: string, values: Record<string, unknown>[]): Promise<T[]> {
   const { data, error } = await db().from(table).insert(values).select()
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
   return (data ?? []) as T[]
 }
 
 export async function updateRow<T>(table: string, id: string, values: Record<string, unknown>): Promise<T> {
   const { data, error } = await db().from(table).update(values).eq('id', id).select().single()
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
   return data as T
 }
 
@@ -44,9 +65,9 @@ export async function deleteRow(table: string, id: string): Promise<void> {
   // 带上 select 才能知道到底删掉了几行：
   // RLS 拒绝 delete 时 PostgREST 仍返回 204，若不加判断，界面会显示「已删除」但其实什么都没发生
   const { data, error } = await db().from(table).delete().eq('id', id).select('id')
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
   if (!data || data.length === 0) {
-    throw new Error('没有删除权限：普通人员只能新增与编辑，删除需要管理员角色')
+    throw new Error('你的岗位角色没有删除权限，请联系管理员调整角色')
   }
 }
 
@@ -54,12 +75,12 @@ export async function deleteRow(table: string, id: string): Promise<void> {
 export async function deleteAllRows(table: string): Promise<void> {
   // Supabase 要求 delete 必须带条件，这里用一个永远不成立的过滤，等价于清空全表
   const { error } = await db().from(table).delete().not('id', 'is', null)
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
 }
 
 export async function countRows(table: string): Promise<number> {
   const { count, error } = await db().from(table).select('id', { count: 'exact', head: true })
-  if (error) throw new Error(error.message)
+  if (error) throw new Error(translateDbError(error.message))
   return count ?? 0
 }
 

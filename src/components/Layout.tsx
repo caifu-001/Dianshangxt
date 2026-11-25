@@ -11,6 +11,7 @@ import {
   LogOut,
   Megaphone,
   Menu,
+  Network,
   Package,
   Settings,
   ShoppingCart,
@@ -20,7 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
-import { ROLE_META } from '../lib/permissions'
+import { ROLE_META, type PermissionCode } from '../lib/permissions'
 import { cn, initials } from '../lib/utils'
 import { Badge } from './ui'
 
@@ -32,44 +33,45 @@ const NAV_GROUPS: Array<{
     icon: typeof LayoutDashboard
     end?: boolean
     badge?: string
-    /** 仅管理员及以上可见 */
-    staffOnly?: boolean
+    /** 需要该权限码才显示；不填表示全员可见 */
+    perm?: PermissionCode
   }>
 }> = [
   {
     title: '经营',
     items: [
       { to: '/', label: '运营概览', icon: LayoutDashboard, end: true },
-      { to: '/stores', label: '店铺管理', icon: StoreIcon },
-      { to: '/products', label: '商品管理', icon: Package },
+      { to: '/stores', label: '店铺管理', icon: StoreIcon, perm: 'stores.view' },
+      { to: '/products', label: '商品管理', icon: Package, perm: 'products.view' },
     ],
   },
   {
     title: '交易',
     items: [
-      { to: '/orders', label: '订单管理', icon: ShoppingCart },
-      { to: '/inventory', label: '库存管理', icon: Boxes },
-      { to: '/profit', label: '利润核算', icon: BarChart3 },
+      { to: '/orders', label: '订单管理', icon: ShoppingCart, perm: 'orders.view' },
+      { to: '/inventory', label: '库存管理', icon: Boxes, perm: 'inventory.view' },
+      { to: '/profit', label: '利润核算', icon: BarChart3, perm: 'profit.view' },
     ],
   },
   {
     title: '增长',
     items: [
-      { to: '/ads', label: '广告投放', icon: Megaphone },
-      { to: '/creators', label: '达人合作', icon: Users, badge: 'TikTok' },
+      { to: '/ads', label: '广告投放', icon: Megaphone, perm: 'ads.view' },
+      { to: '/creators', label: '达人合作', icon: Users, badge: 'TikTok', perm: 'creators.view' },
     ],
   },
   {
     title: '协同',
     items: [
-      { to: '/tasks', label: '任务看板', icon: CheckSquare },
-      { to: '/accounts', label: '账号管理', icon: UserCog, staffOnly: true },
+      { to: '/tasks', label: '任务看板', icon: CheckSquare, perm: 'tasks.view' },
+      { to: '/org', label: '组织架构', icon: Network },
+      { to: '/accounts', label: '账号管理', icon: UserCog, perm: 'account.manage' },
     ],
   },
 ]
 
 export default function AppLayout() {
-  const { profile, user, signOut, schemaReady, role, isStaff } = useAuth()
+  const { profile, user, signOut, schemaReady, role, can, customRole } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const location = useLocation()
@@ -81,10 +83,10 @@ export default function AppLayout() {
 
   const displayName = profile?.full_name || user?.email?.split('@')[0] || '运营同学'
 
-  // 普通人员看不到管理类入口
+  // 菜单按权限码收敛：自定义角色看不到的模块，入口也不出现
   const visibleGroups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.staffOnly || isStaff),
+    items: group.items.filter((item) => !item.perm || can(item.perm)),
   })).filter((group) => group.items.length > 0)
 
   const sidebar = (
@@ -182,6 +184,11 @@ export default function AppLayout() {
               </span>
             </div>
             <p className="text-[10px] text-ink-400 truncate">{user?.email}</p>
+            {customRole && role !== 'super_admin' && (
+              <p className="text-[10px] text-brand-600 truncate" title="岗位角色决定可见模块">
+                {customRole.name}
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -265,15 +272,15 @@ export default function AppLayout() {
           </div>
         </header>
 
-        {/* 旧版数据库缺少 status 列时，角色体系不生效，给出明确指引 */}
-        {profile && !('status' in profile) && (
+        {/* 旧版数据库缺少组织架构字段时，权限体系不完整，给出明确指引 */}
+        {profile && !('role_id' in profile) && (
           <div className="px-4 sm:px-6 pt-4">
             <div className="rounded-xl border border-amber-200/80 bg-amber-50 px-3.5 py-2.5 flex items-start gap-2">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
               <p className="text-[11.5px] leading-relaxed text-amber-800">
-                数据库还没升级到角色权限版本，当前所有账号都会被识别为「普通人员」。
+                数据库还没升级到组织架构版本，部门 / 岗位 / 自定义角色暂不可用（当前按系统角色默认权限运行）。
                 请到 <Link to="/setup" className="underline font-medium">数据源</Link> 页复制最新脚本，
-                在 Supabase SQL Editor 重新执行一次即可启用超级管理员 / 管理员 / 普通人员三级权限。
+                在 Supabase SQL Editor 重新执行一次即可启用。
               </p>
             </div>
           </div>

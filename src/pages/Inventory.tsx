@@ -373,7 +373,7 @@ export default function Inventory() {
                           <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEdit(i)}>
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
-                          <button className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => setDeleting(i)}>
+                          <button data-perm="delete" className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => setDeleting(i)}>
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>

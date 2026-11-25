@@ -398,7 +398,7 @@ export default function Profit() {
                       <td className="td text-[12px] text-ink-500 max-w-[280px] truncate">{e.remark ?? '—'}</td>
                       <td className="td text-right num font-medium">{money(e.amount, e.currency, 0)}</td>
                       <td className="td">
-                        <button
+                        <button data-perm="delete"
                           className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50 opacity-0 group-hover:opacity-100"
                           onClick={() => setDeleting(e)}
                         >

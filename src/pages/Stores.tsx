@@ -245,7 +245,7 @@ export default function Stores() {
                           <button className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-ink-600 hover:bg-ink-50" onClick={() => openEdit(store)}>
                             <Pencil className="w-3 h-3" /> 编辑
                           </button>
-                          <button
+                          <button data-perm="delete"
                             className="w-full flex items-center gap-2 px-3 py-1.5 text-[12px] text-rose-600 hover:bg-rose-50"
                             onClick={() => {
                               setDeleting(store)

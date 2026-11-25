@@ -1,8 +1,9 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { LogOut, Loader2, ShieldOff } from 'lucide-react'
+import { Lock, LogOut, Loader2, ShieldOff } from 'lucide-react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ToastProvider, Button } from './components/ui'
+import type { PermissionCode } from './lib/permissions'
 import AppLayout from './components/Layout'
 import Login from './pages/Login'
 import Setup from './pages/Setup'
@@ -16,6 +17,7 @@ import Creators from './pages/Creators'
 import Profit from './pages/Profit'
 import Tasks from './pages/Tasks'
 import Accounts from './pages/Accounts'
+import Org from './pages/Org'
 import Settings from './pages/Settings'
 
 function FullScreenLoader({ label = '正在加载工作台…' }: { label?: string }) {
@@ -32,11 +34,24 @@ function FullScreenLoader({ label = '正在加载工作台…' }: { label?: stri
   )
 }
 
-/** 管理类页面的前端守卫；真正的拦截在数据库 RLS 与触发器 */
-function RequireStaff({ children }: { children: ReactNode }) {
-  const { isStaff } = useAuth()
-  if (!isStaff) return <Navigate to="/" replace />
-  return <>{children}</>
+/** 业务页面的前端守卫；真正的拦截在数据库 RLS 里（public.has_permission） */
+function RequirePermission({ perm, children }: { perm: PermissionCode; children: ReactNode }) {
+  const { can } = useAuth()
+  if (can(perm)) return <>{children}</>
+  return (
+    <div className="card p-10 text-center">
+      <div className="w-11 h-11 rounded-xl bg-ink-100 text-ink-400 flex items-center justify-center mx-auto">
+        <Lock className="w-5 h-5" />
+      </div>
+      <p className="mt-3 text-[14px] font-medium text-ink-800">没有该模块的访问权限</p>
+      <p className="mt-1 text-[12.5px] text-ink-500 max-w-md mx-auto leading-relaxed">
+        你的岗位角色未包含这个模块。如需访问，请让管理员在「账号管理」里为你分配包含该模块的角色。
+      </p>
+      <Link to="/" className="inline-block mt-4">
+        <Button size="sm">返回运营概览</Button>
+      </Link>
+    </div>
+  )
 }
 
 function AccountBlocked({ kind, onSignOut }: { kind: 'disabled' | 'missing'; onSignOut: () => void }) {
@@ -104,20 +119,22 @@ function AppRoutes() {
     <Routes>
       <Route element={<AppLayout />}>
         <Route index element={<Dashboard />} />
-        <Route path="stores" element={<Stores />} />
-        <Route path="products" element={<Products />} />
-        <Route path="orders" element={<Orders />} />
-        <Route path="inventory" element={<Inventory />} />
-        <Route path="ads" element={<Ads />} />
-        <Route path="creators" element={<Creators />} />
-        <Route path="profit" element={<Profit />} />
-        <Route path="tasks" element={<Tasks />} />
+        <Route path="stores" element={<RequirePermission perm="stores.view"><Stores /></RequirePermission>} />
+        <Route path="products" element={<RequirePermission perm="products.view"><Products /></RequirePermission>} />
+        <Route path="orders" element={<RequirePermission perm="orders.view"><Orders /></RequirePermission>} />
+        <Route path="inventory" element={<RequirePermission perm="inventory.view"><Inventory /></RequirePermission>} />
+        <Route path="ads" element={<RequirePermission perm="ads.view"><Ads /></RequirePermission>} />
+        <Route path="creators" element={<RequirePermission perm="creators.view"><Creators /></RequirePermission>} />
+        <Route path="profit" element={<RequirePermission perm="profit.view"><Profit /></RequirePermission>} />
+        <Route path="tasks" element={<RequirePermission perm="tasks.view"><Tasks /></RequirePermission>} />
+        {/* 组织架构对全员可见（通讯录），编辑按钮按 org.manage 收敛 */}
+        <Route path="org" element={<Org />} />
         <Route
           path="accounts"
           element={
-            <RequireStaff>
+            <RequirePermission perm="account.manage">
               <Accounts />
-            </RequireStaff>
+            </RequirePermission>
           }
         />
         <Route path="settings" element={<Settings />} />

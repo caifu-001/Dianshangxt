@@ -11,6 +11,42 @@ export interface Profile {
   note: string | null
   settings: Record<string, unknown>
   created_at: string
+  /** 组织架构关联（旧库可能没有这几列，读取时为 undefined） */
+  department_id?: string | null
+  position_id?: string | null
+  role_id?: string | null
+}
+
+/* ---------------- 组织架构 ---------------- */
+
+export interface Department {
+  id: string
+  name: string
+  parent_id: string | null
+  leader_id: string | null
+  description: string | null
+  sort_order: number
+  created_at: string
+}
+
+export interface Position {
+  id: string
+  name: string
+  department_id: string | null
+  level: string
+  description: string | null
+  sort_order: number
+  created_at: string
+}
+
+export interface RoleDef {
+  id: string
+  name: string
+  description: string | null
+  permissions: string[]
+  is_system: boolean
+  sort_order: number
+  created_at: string
 }
 
 export interface Store {

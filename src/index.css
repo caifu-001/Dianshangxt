@@ -126,3 +126,10 @@ body {
     width: 8px;
   }
 }
+
+/* 删除类操作按权限隐藏：AuthContext 会把当前账号的 data.delete 权限写进 body，
+   页面里给按钮加 data-perm="delete" 即可，无需每个模块各写一遍判断。
+   这只是界面收敛，真正的拦截在数据库 RLS（public.has_permission('data.delete')）。 */
+body[data-perm-delete='false'] [data-perm='delete'] {
+  display: none !important;
+}
