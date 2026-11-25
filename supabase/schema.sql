@@ -986,9 +986,9 @@ create table if not exists public.finance_expenses (
 create index if not exists idx_finance_expenses_date on public.finance_expenses(expense_date desc);
 create index if not exists idx_finance_expenses_cat on public.finance_expenses(category, expense_date desc);
 create index if not exists idx_finance_expenses_status on public.finance_expenses(status);
-create index if not exists idx_finance_expenses_source on public.finance_expenses(source_module, source_id);
 
--- 旧库补列（幂等）
+-- 旧库补列（幂等）：必须在建索引之前，否则旧库表已存在、create table 不会补列，
+-- 建索引时列还不存在会报 42703 column does not exist。
 alter table public.finance_expenses add column if not exists source_module text not null default 'manual';
 alter table public.finance_expenses add column if not exists source_id uuid;
 do $$ begin
@@ -996,6 +996,8 @@ do $$ begin
   alter table public.finance_expenses add constraint finance_expenses_source_module_chk
     check (source_module in ('manual','ads','creator','brand'));
 end $$;
+-- 补列完成后再建索引
+create index if not exists idx_finance_expenses_source on public.finance_expenses(source_module, source_id);
 
 -- 明细：差旅按交通/住宿/餐补逐条，工资按基本工资/社保/公积金逐条
 create table if not exists public.finance_expense_items (
