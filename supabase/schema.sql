@@ -293,10 +293,20 @@ create table if not exists public.departments (
   parent_id   uuid references public.departments(id) on delete set null,
   leader_id   uuid references public.profiles(id) on delete set null,
   description text,
+  code        text,                               -- 部门编码：IT / HR / OPS / FIN ...
+  scope       text[] not null default '{}',       -- 部门级权限码：模块可见范围 + 人事职能
+  inherit_parent boolean not null default true,   -- 是否继承上级部门的可见范围
   sort_order  integer not null default 0,
   created_at  timestamptz not null default now()
 );
 create index if not exists idx_departments_parent on public.departments(parent_id);
+
+-- 兼容旧库：部门权限是新概念，缺列则补齐
+alter table public.departments add column if not exists code           text;
+alter table public.departments add column if not exists scope          text[] not null default '{}';
+alter table public.departments add column if not exists inherit_parent boolean not null default true;
+create unique index if not exists uq_departments_code
+  on public.departments (lower(code)) where code is not null;
 
 create table if not exists public.positions (
   id            uuid primary key default gen_random_uuid(),
@@ -503,6 +513,30 @@ create table if not exists public.employee_events (
 create index if not exists idx_emp_events_profile on public.employee_events(profile_id, created_at desc);
 create index if not exists idx_emp_events_time    on public.employee_events(created_at desc);
 
+-- -------------------------------------------------------------
+-- 14. 绩效：按考核周期记录评分与评语
+--     一人一周期一条，重新评定覆盖原记录（updated_at 变化可追溯）。
+--     department_id 保存评估当时的部门快照，避免调岗后历史报表被改写。
+-- -------------------------------------------------------------
+create table if not exists public.performance_reviews (
+  id            uuid primary key default gen_random_uuid(),
+  profile_id    uuid not null references public.profiles(id) on delete cascade,
+  period        text not null,                          -- 2026-Q4 / 2026-11
+  department_id uuid references public.departments(id) on delete set null,
+  reviewer_id   uuid references public.profiles(id) on delete set null,
+  score         numeric(4,1) not null default 0 check (score >= 0 and score <= 100),
+  grade         text not null default 'B' check (grade in ('S', 'A', 'B', 'C', 'D')),
+  kpi           jsonb not null default '{}'::jsonb,     -- 分项：{sales, execution, collaboration, growth}
+  summary       text,
+  improvement   text,
+  status        text not null default 'published' check (status in ('draft', 'published')),
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now(),
+  unique (profile_id, period)
+);
+create index if not exists idx_perf_period on public.performance_reviews(period, score desc);
+create index if not exists idx_perf_profile on public.performance_reviews(profile_id);
+
 -- =============================================================
 --  行级安全（RLS）与角色权限
 --  权限模型：团队共享同一份业务数据，按角色控制「可删 / 可管人」
@@ -529,6 +563,33 @@ as $$
   );
 $$;
 
+-- 通讯录：只暴露姓名 / 邮箱 / 部门 / 岗位 / 角色等公开字段，
+-- 不返回备注、设置、最近登录等敏感信息。
+-- 组织架构、绩效等页面靠它显示同事姓名，普通成员也能读到（公司通讯录语义）。
+create or replace function public.team_directory()
+returns table (
+  id                uuid,
+  full_name         text,
+  email             text,
+  role              text,
+  department_id     uuid,
+  position_id       uuid,
+  role_id           uuid,
+  status            text,
+  employment_status text,
+  hire_date         date,
+  is_leader         boolean
+)
+language sql stable security definer set search_path = public
+as $$
+  select p.id, p.full_name, p.email, p.role, p.department_id, p.position_id, p.role_id,
+         p.status, coalesce(p.employment_status, 'active'), p.hire_date,
+         exists (select 1 from public.departments d where d.leader_id = p.id)
+    from public.profiles p
+   where public.is_active_user()
+   order by p.created_at;
+$$;
+
 create or replace function public.is_staff()
 returns boolean
 language sql stable security definer set search_path = public
@@ -551,36 +612,66 @@ as $$
   );
 $$;
 
+-- 部门可见范围：本部门 scope ∪ 上级部门 scope（inherit_parent 为 true 时逐级向上）
+-- 部门是「团队级」授权：信息中心配全模块，人力资源部配人事 / 绩效职能，
+-- 部门内所有成员自动获得，不用给每个人单独配角色。
+create or replace function public.dept_scope(p_user uuid)
+returns text[]
+language sql stable security definer set search_path = public
+as $$
+  with recursive chain as (
+    select d.id, d.parent_id, coalesce(d.scope, '{}') as scope, d.inherit_parent, 1 as lvl
+      from public.profiles p
+      join public.departments d on d.id = p.department_id
+     where p.id = p_user
+    union all
+    select d.id, d.parent_id, coalesce(d.scope, '{}'), d.inherit_parent, c.lvl + 1
+      from chain c
+      join public.departments d on d.id = c.parent_id
+     where c.inherit_parent and c.lvl < 8
+  )
+  select coalesce(array_agg(distinct s), '{}')
+    from chain c, unnest(c.scope) as s;
+$$;
+
 -- 权限判定：模块级权限码（stores.view / orders.edit / data.delete ...）
--- 三层收敛，缺一不可：
+-- 四层收敛，缺一不可：
 --   1) 账号必须 active
---   2) 系统角色给出「上限」：member 永远拿不到管理类权限
---   3) 自定义角色（roles.permissions）给出「范围」：没配角色时按角色默认值放行
--- 管理类权限（管人 / 管组织 / 管系统配置）不受自定义角色收窄，
--- 否则管理员很容易把自己锁在门外。
+--   2) 系统角色给出「上限」：member 永远拿不到管人 / 管组织 / 管系统配置与删除
+--   3) 部门范围（departments.scope，含上级继承）给出「团队级授权」
+--   4) 岗位角色（roles.permissions）给出「个人范围」
+-- 部门与角色取并集；两者都没配时，按系统角色默认值放行（兼容老库）。
+-- 管理类权限不受角色 / 部门收窄，否则管理员很容易把自己锁在门外。
 create or replace function public.has_permission(code text)
 returns boolean
 language sql stable security definer set search_path = public
 as $$
   select coalesce((
     select case
-      when coalesce(p.status, 'active') <> 'active' then false
-      when p.role = 'super_admin' then true
-      -- 管理类：只有系统角色管理员及以上可以，自定义角色无法授予或剥夺
-      when code in ('account.manage', 'org.manage', 'system.manage') then p.role = 'admin'
-      -- 未分配自定义角色：按系统角色默认值
-      when p.role_id is null then
-        case when p.role = 'admin' then true
-             else code like '%.view' or code like '%.edit'
-        end
-      -- 已分配自定义角色：必须在角色权限内，且不能突破系统角色上限
+      when coalesce(x.status, 'active') <> 'active' then false
+      when x.role = 'super_admin' then true
+      when code in ('account.manage', 'org.manage', 'system.manage') then x.role = 'admin'
+      when x.role = 'admin' then
+        x.role_id is null
+        or code = any(coalesce(x.role_perms, '{}'))
+        or code = any(x.dept)
+      when x.role_id is null and coalesce(array_length(x.dept, 1), 0) = 0 then
+        -- 未配角色、部门也没配范围：沿用老行为，业务模块全开放
+        -- 绩效与人事属于敏感数据，不进入兜底（老库成员需要显式配置才能看）
+        (code like '%.view' or code like '%.edit')
+        and code not like 'performance.%' and code not like 'hr.%'
       else
-        coalesce(code = any(coalesce(r.permissions, '{}')), false)
-        and (p.role = 'admin' or code like '%.view' or code like '%.edit')
+        (code = any(coalesce(x.role_perms, '{}')) or code = any(x.dept))
+        and (code like '%.view' or code like '%.edit' or code like 'hr.%' or code like 'performance.%')
     end
-    from public.profiles p
-    left join public.roles r on r.id = p.role_id
-    where p.id = auth.uid()
+    from (
+      select p.status, p.role, p.role_id,
+             r.permissions as role_perms,
+             public.dept_scope(p.id) as dept
+        from public.profiles p
+        left join public.roles r on r.id = p.role_id
+       where p.id = auth.uid()
+    ) x
   ), false);
 $$;
 
@@ -591,7 +682,8 @@ declare
     'profiles','stores','products','orders','inventory',
     'campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
-    'departments','positions','roles','access_requests','employee_events'
+    'departments','positions','roles','access_requests','employee_events',
+    'performance_reviews'
   ];
 begin
   foreach t in array tabs loop
@@ -609,13 +701,14 @@ drop policy if exists "profiles_update_self"  on public.profiles;
 drop policy if exists "profiles_update_staff" on public.profiles;
 drop policy if exists "profiles_delete_super" on public.profiles;
 
--- 本人可见自己；管人或管组织的人可见全部（账号管理页 / 组织架构页需要）
+-- 本人可见自己；管人 / 管组织 / 人事岗（HR）可见全部
 create policy "profiles_select" on public.profiles
   for select to authenticated
   using (
     id = auth.uid()
     or public.has_permission('account.manage')
     or public.has_permission('org.manage')
+    or public.has_permission('hr.view')
   );
 
 -- 本人可改自己的资料（角色 / 状态 / 组织归属由触发器拦截，不能自提权）
@@ -629,6 +722,14 @@ create policy "profiles_update_staff" on public.profiles
   for update to authenticated
   using (public.is_staff())
   with check (public.is_staff());
+
+-- 人事岗（HR 部门）也能维护他人档案，但触发器 guard_profile_changes 会
+-- 拦住角色 / 岗位角色字段，HR 只能动人事与组织归属，无法借此提权
+drop policy if exists "profiles_update_hr" on public.profiles;
+create policy "profiles_update_hr" on public.profiles
+  for update to authenticated
+  using (public.has_permission('hr.manage'))
+  with check (public.has_permission('hr.manage'));
 
 -- 仅超级管理员可移除档案，且不能移除自己
 create policy "profiles_delete_super" on public.profiles
@@ -801,7 +902,28 @@ drop policy if exists "emp_events_select" on public.employee_events;
 -- 所以不开放 insert / update / delete 策略，前端无法伪造审计记录
 create policy "emp_events_select" on public.employee_events
   for select to authenticated
-  using (profile_id = auth.uid() or public.has_permission('account.manage'));
+  using (profile_id = auth.uid() or public.has_permission('hr.view') or public.has_permission('account.manage'));
+
+-- ---------- 绩效（performance_reviews） ----------
+-- 本人看自己的；HR / 管理者看全部；录入与修改需要 performance.edit
+drop policy if exists "perf_select" on public.performance_reviews;
+drop policy if exists "perf_insert" on public.performance_reviews;
+drop policy if exists "perf_update" on public.performance_reviews;
+drop policy if exists "perf_delete" on public.performance_reviews;
+
+create policy "perf_select" on public.performance_reviews
+  for select to authenticated
+  using (profile_id = auth.uid() or public.has_permission('performance.view'));
+create policy "perf_insert" on public.performance_reviews
+  for insert to authenticated
+  with check (public.has_permission('performance.edit'));
+create policy "perf_update" on public.performance_reviews
+  for update to authenticated
+  using (public.has_permission('performance.edit'))
+  with check (public.has_permission('performance.edit'));
+create policy "perf_delete" on public.performance_reviews
+  for delete to authenticated
+  using (public.has_permission('performance.edit'));
 
 -- ---------- 档案变更自动留痕：入职 / 调岗 / 权限变更 / 停用 / 离职 ----------
 create or replace function public.log_profile_change()
@@ -901,8 +1023,8 @@ declare
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items'
   ];
 begin
-  if not public.is_staff() then
-    raise exception '只有管理员可以移交资源';
+  if not (public.is_staff() or public.has_permission('hr.manage')) then
+    raise exception '只有管理员或人事岗可以移交资源';
   end if;
   if p_from is null or p_to is null then
     raise exception '移交双方都必须指定';
@@ -960,8 +1082,8 @@ declare
   t     record;
   moved jsonb := '{}'::jsonb;
 begin
-  if not public.is_staff() then
-    raise exception '只有管理员可以办理离职交接';
+  if not (public.is_staff() or public.has_permission('hr.manage')) then
+    raise exception '只有管理员或人事岗可以办理离职交接';
   end if;
   if p_target = auth.uid() then
     raise exception '不能给自己办理离职';
@@ -980,6 +1102,9 @@ begin
   if p_handover = p_target then
     raise exception '交接人不能是离职人自己';
   end if;
+
+  -- 本事务内允许改写角色 / 组织字段（guard_profile_changes 会放行）
+  perform set_config('app.offboarding', '1', true);
 
   -- 资源交接：把离职人名下的记录整体转给接手人；
   -- 不指定接手人时保留原归属（作为团队公共数据），不会丢失
@@ -1079,7 +1204,14 @@ begin
     return new;
   end if;
 
-  if new.role is distinct from old.role or new.status is distinct from old.status then
+  -- 离职交接函数在本事务内打标：它要做「降级 + 清空组织 + 停用」的原子操作，
+  -- 这些字段平时只有管理员能改，但函数内部已经做过 hr.manage 与目标角色校验
+  if coalesce(current_setting('app.offboarding', true), '') = '1' then
+    return new;
+  end if;
+
+  -- 系统角色只能由管理员调整：人事岗（HR）也不行，否则 HR 可以给自己升管理员
+  if new.role is distinct from old.role then
     if public.is_super_admin() then
       -- 不允许把自己降级，否则可能把系统锁死
       if old.id = auth.uid() and new.role is distinct from 'super_admin' then
@@ -1092,28 +1224,52 @@ begin
       end if;
       return new;
     else
-      raise exception '无权修改角色或账号状态';
+      raise exception '只有管理员可以调整系统角色';
     end if;
   end if;
 
-  -- 组织归属（部门 / 岗位 / 自定义角色）同样只能由管理员调整：
-  -- 否则普通成员可以给自己挂一个全权限角色，绕过整条权限链
-  if new.role_id       is distinct from old.role_id
-     or new.department_id is distinct from old.department_id
-     or new.position_id   is distinct from old.position_id then
+  -- 账号启停：管理员不限；HR 只能处理普通人员（入职开通、离职停用）
+  if new.status is distinct from old.status then
+    if public.is_staff() then
+      if old.role = 'super_admin' and not public.is_super_admin() then
+        raise exception '只有超级管理员才能调整超级管理员账号';
+      end if;
+    elsif public.has_permission('hr.manage') then
+      if old.role <> 'member' then
+        raise exception '人事岗只能调整普通人员的账号状态';
+      end if;
+    else
+      raise exception '无权修改账号状态';
+    end if;
+  end if;
+
+  -- 岗位角色决定业务权限，只认管理员：否则普通成员可以给自己挂全权限角色
+  if new.role_id is distinct from old.role_id then
     if not public.is_staff() then
-      raise exception '无权修改部门、岗位或自定义角色，请联系管理员';
+      raise exception '只有管理员可以调整岗位角色';
     end if;
   end if;
 
-  -- 人事字段同理：入职日期、离职时间、交接人都属于管理员维护的范围
+  -- 部门 / 岗位归属：管理员和人事岗都可以（入职分配、调岗）
+  if new.department_id is distinct from old.department_id
+     or new.position_id is distinct from old.position_id then
+    if not (public.is_staff() or public.has_permission('hr.manage')) then
+      raise exception '无权修改部门或岗位，请联系管理员';
+    end if;
+    -- 人事岗不能借调岗把自己或他人塞进更高权限的部门
+    if not public.is_staff() and new.id = auth.uid() then
+      raise exception '人事岗不能调整自己的部门或岗位';
+    end if;
+  end if;
+
+  -- 人事字段：管理员与 HR 可维护（入职日期、离职时间、交接人）
   if new.employment_status is distinct from old.employment_status
      or new.hire_date      is distinct from old.hire_date
      or new.left_at        is distinct from old.left_at
      or new.left_reason    is distinct from old.left_reason
      or new.handover_to    is distinct from old.handover_to
      or new.provisioned_by is distinct from old.provisioned_by then
-    if not public.is_staff() then
+    if not (public.is_staff() or public.has_permission('hr.manage')) then
       raise exception '无权修改人事状态或入职离职信息，请联系管理员';
     end if;
   end if;
@@ -1145,7 +1301,7 @@ grant select, insert, update, delete on
   public.competitors, public.competitor_snapshots,
   public.suppliers, public.purchase_orders, public.purchase_items,
   public.departments, public.positions, public.roles,
-  public.access_requests, public.employee_events
+  public.access_requests, public.employee_events, public.performance_reviews
   to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
@@ -1153,19 +1309,79 @@ grant execute on function public.offboard_member(uuid, uuid, text) to authentica
 grant execute on function public.transfer_member_resources(uuid, uuid) to authenticated;
 grant execute on function public.decide_access_request(uuid, boolean, text) to authenticated;
 grant execute on function public.has_permission(text) to authenticated;
+grant execute on function public.dept_scope(uuid) to authenticated;
+grant execute on function public.team_directory() to authenticated;
 
 -- -------------------------------------------------------------
--- 默认组织数据（仅当表为空时写入，不会覆盖你已有的配置）
+-- 默认组织数据（按部门编码判重，只补缺的，不会覆盖你已有的配置）
+-- scope 决定该部门内所有成员可见的模块与人事职能：
+--   信息中心   → 全部业务模块可读写（系统级账号管理仍由管理员角色决定）
+--   人力资源部 → 花名册、入离职办理、绩效查看与评定
 -- -------------------------------------------------------------
-insert into public.departments (name, description, sort_order)
-select v.name, v.description, v.sort_order
+insert into public.departments (name, code, description, sort_order, scope)
+select v.name, v.code, v.description, v.sort_order, v.scope
 from (values
-  ('运营部',     '店铺日常运营、Listing 与库存周转', 1),
-  ('广告投放部', '站内广告与站外投放',             2),
-  ('内容营销部', '达人合作、短视频与直播',         3),
-  ('财务部',     '利润核算、费用与税务',           4)
-) as v(name, description, sort_order)
-where not exists (select 1 from public.departments);
+  ('信息中心',   'IT',      '系统与账号、全模块数据支持',        0,
+   array['stores.view','stores.edit','products.view','products.edit',
+         'orders.view','orders.edit','inventory.view','inventory.edit',
+         'purchase.view','purchase.edit','profit.view','profit.edit',
+         'ads.view','ads.edit','creators.view','creators.edit',
+         'competitors.view','competitors.edit','tasks.view','tasks.edit',
+         'performance.view','performance.edit','hr.view']::text[]),
+  ('人力资源部', 'HR',      '招聘入离职、花名册与绩效管理',      1,
+   array['hr.view','hr.manage',
+         'performance.view','performance.edit','tasks.view','tasks.edit']::text[]),
+  ('运营部',     'OPS',     '店铺日常运营、Listing 与库存周转',  2,
+   array['stores.view','stores.edit','products.view','products.edit',
+         'orders.view','orders.edit','inventory.view','inventory.edit',
+         'purchase.view','purchase.edit','tasks.view','tasks.edit',
+         'performance.view']::text[]),
+  ('广告投放部', 'ADS',     '站内广告与站外投放',                3,
+   array['ads.view','ads.edit','competitors.view','competitors.edit',
+         'products.view','tasks.view','performance.view']::text[]),
+  ('内容营销部', 'CONTENT', '达人合作、短视频与直播',            4,
+   array['creators.view','creators.edit','products.view',
+         'tasks.view','tasks.edit','performance.view']::text[]),
+  ('财务部',     'FIN',     '利润核算、费用与税务',              5,
+   array['profit.view','profit.edit','orders.view','purchase.view',
+         'products.view','stores.view','performance.view']::text[])
+) as v(name, code, description, sort_order, scope)
+where not exists (
+  select 1 from public.departments d
+   where lower(coalesce(d.code, '')) = lower(v.code) or d.name = v.name
+);
+
+-- 老库：部门没有编码 / 范围时补上默认值，已有配置一律不动
+update public.departments d
+   set code = v.code
+  from (values ('信息中心','IT'), ('人力资源部','HR'), ('运营部','OPS'),
+               ('广告投放部','ADS'), ('内容营销部','CONTENT'), ('财务部','FIN')
+       ) as v(name, code)
+ where d.name = v.name and d.code is null;
+
+update public.departments d
+   set scope = v.scope
+  from (values
+    ('信息中心',   array['stores.view','stores.edit','products.view','products.edit',
+                          'orders.view','orders.edit','inventory.view','inventory.edit',
+                          'purchase.view','purchase.edit','profit.view','profit.edit',
+                          'ads.view','ads.edit','creators.view','creators.edit',
+                          'competitors.view','competitors.edit','tasks.view','tasks.edit',
+                          'performance.view','performance.edit','hr.view']::text[]),
+    ('人力资源部', array['hr.view','hr.manage',
+                          'performance.view','performance.edit','tasks.view','tasks.edit']::text[]),
+    ('运营部',     array['stores.view','stores.edit','products.view','products.edit',
+                          'orders.view','orders.edit','inventory.view','inventory.edit',
+                          'purchase.view','purchase.edit','tasks.view','tasks.edit',
+                          'performance.view']::text[]),
+    ('广告投放部', array['ads.view','ads.edit','competitors.view','competitors.edit',
+                          'products.view','tasks.view','performance.view']::text[]),
+    ('内容营销部', array['creators.view','creators.edit','products.view',
+                          'tasks.view','tasks.edit','performance.view']::text[]),
+    ('财务部',     array['profit.view','profit.edit','orders.view','purchase.view',
+                          'products.view','stores.view','performance.view']::text[])
+  ) as v(name, scope)
+ where d.name = v.name and coalesce(array_length(d.scope, 1), 0) = 0;
 
 insert into public.positions (name, level, description, sort_order)
 select v.name, v.level, v.description, v.sort_order
@@ -1198,6 +1414,14 @@ from (values
 ) as v(name, description, permissions, sort_order)
 where not exists (select 1 from public.roles);
 
+-- 人力资源专员：给「需要办入离职、录绩效」的成员用；
+-- 不配这个角色也行——把成员放进人力资源部，部门范围同样会给到这些权限
+insert into public.roles (name, description, permissions, is_system, sort_order)
+select '人力资源专员', '办理入职离职、维护花名册、录入绩效',
+       array['hr.view','hr.manage','performance.view','performance.edit',
+             'tasks.view','tasks.edit']::text[], true, 6
+ where not exists (select 1 from public.roles where name = '人力资源专员');
+
 -- 新增模块的权限补齐：内置角色只在表为空时插入，
 -- 老库重跑脚本时不会重新生成，这里按「缺什么补什么」的方式补上，
 -- 已经存在的权限码不会重复，也不会覆盖管理员手工调整过的其他权限。
@@ -1212,7 +1436,9 @@ begin
       ('广告投手',   'competitors.view'), ('广告投手', 'competitors.edit'),
       ('内容达人',   'competitors.view'),
       ('财务核算',   'purchase.view'),
-      ('只读观察员', 'competitors.view'), ('只读观察员', 'purchase.view')
+      ('只读观察员', 'competitors.view'), ('只读观察员', 'purchase.view'),
+      ('运营专员',   'performance.view'), ('财务核算', 'performance.view'),
+      ('只读观察员', 'performance.view')
     ) as v(role_name, code)
   loop
     update public.roles

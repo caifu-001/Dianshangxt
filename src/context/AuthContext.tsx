@@ -11,6 +11,7 @@ import {
   isStaff as checkStaff,
   isSuperAdmin as checkSuper,
   normalizeRole,
+  resolveDeptScope,
 } from '../lib/permissions'
 
 interface AuthContextValue {
@@ -30,6 +31,8 @@ interface AuthContextValue {
   can: (code: PermissionCode) => boolean
   /** 分配的自定义角色（岗位角色），未分配为 null */
   customRole: RoleDef | null
+  /** 所在部门（含上级继承）带来的权限码 */
+  deptPermissions: PermissionCode[]
   /** 管理员代建的账号首次登录时要求先改掉初始密码 */
   mustChangePassword: boolean
   /** 账号被禁用或档案被移除时非空，用于阻断进入工作台 */
@@ -57,6 +60,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [schemaMessage, setSchemaMessage] = useState<string | null>(null)
   const [blocked, setBlocked] = useState<'disabled' | 'missing' | null>(null)
   const [roles, setRoles] = useState<RoleDef[]>([])
+  const [deptPermissions, setDeptPermissions] = useState<PermissionCode[]>([])
+
+  /**
+   * 部门范围：本部门 scope + 上级部门 scope（继承开关打开时）。
+   * 部门是团队级授权，配合岗位角色一起决定能看到哪些模块。
+   */
+  const loadDeptScope = useCallback(async (departmentId?: string | null) => {
+    if (!departmentId) {
+      setDeptPermissions([])
+      return
+    }
+    try {
+      const rows = await fetchRows<{
+        id: string
+        name: string
+        parent_id: string | null
+        scope: string[] | null
+        inherit_parent: boolean | null
+      }>('departments', { columns: 'id,name,parent_id,scope,inherit_parent' })
+      const map = new Map(rows.map((d) => [d.id, d]))
+      setDeptPermissions(resolveDeptScope(departmentId, map).all)
+    } catch {
+      // 旧库还没有 departments.scope 列，按「部门不额外授权」处理
+      setDeptPermissions([])
+    }
+  }, [])
 
   const loadProfile = useCallback(async (userId: string) => {
     try {
@@ -67,10 +96,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (!next) setBlocked('missing')
       else if (next.status === 'disabled') setBlocked('disabled')
       else setBlocked(null)
+      await loadDeptScope(next?.department_id)
     } catch {
       setProfile(null)
     }
-  }, [])
+  }, [loadDeptScope])
 
   // 自定义角色表：全员可读，用于把 profile.role_id 解析成具体权限
   const loadRoles = useCallback(async () => {
@@ -211,8 +241,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // 有 role_id 但查不到对应角色（角色被删）时按「无权限」处理，避免意外放大权限
   const permissions = useMemo(() => {
     const rolePerms: string[] | null = profile?.role_id ? (customRole?.permissions ?? []) : null
-    return effectivePermissions(role, rolePerms)
-  }, [role, profile?.role_id, customRole])
+    return effectivePermissions(role, rolePerms, deptPermissions)
+  }, [role, profile?.role_id, customRole, deptPermissions])
 
   // 删除类按钮统一按权限隐藏：页面里给按钮加 data-perm="delete" 即可，
   // 不用每个模块各自写一遍判断。
@@ -236,6 +266,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       permissions,
       can: (code: PermissionCode) => allowed.has(code),
       customRole,
+      deptPermissions,
       mustChangePassword: Boolean((profile?.settings as Record<string, unknown> | undefined)?.must_change_password),
       blocked,
       recheckSchema,
@@ -248,7 +279,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       refreshProfile,
     }
   }, [
-    session, profile, role, permissions, customRole, loading, schemaReady, schemaMessage, blocked,
+    session, profile, role, permissions, customRole, deptPermissions, loading, schemaReady, schemaMessage, blocked,
     recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile,
   ])
 

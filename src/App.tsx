@@ -22,6 +22,7 @@ import Tasks from './pages/Tasks'
 import Accounts from './pages/Accounts'
 import AccessFlow from './pages/AccessFlow'
 import Org from './pages/Org'
+import Performance from './pages/Performance'
 import Settings from './pages/Settings'
 
 function FullScreenLoader({ label = '正在加载工作台…' }: { label?: string }) {
@@ -39,9 +40,19 @@ function FullScreenLoader({ label = '正在加载工作台…' }: { label?: stri
 }
 
 /** 业务页面的前端守卫；真正的拦截在数据库 RLS 里（public.has_permission） */
-function RequirePermission({ perm, children }: { perm: PermissionCode; children: ReactNode }) {
+function RequirePermission({
+  perm,
+  anyOf,
+  children,
+}: {
+  perm?: PermissionCode
+  /** 满足任意一个即可：例如「人员与账号」管理员或人事岗都能进 */
+  anyOf?: PermissionCode[]
+  children: ReactNode
+}) {
   const { can } = useAuth()
-  if (can(perm)) return <>{children}</>
+  const allowed = perm ? can(perm) : (anyOf ?? []).some((code) => can(code))
+  if (allowed) return <>{children}</>
   return (
     <div className="card p-10 text-center">
       <div className="w-11 h-11 rounded-xl bg-ink-100 text-ink-400 flex items-center justify-center mx-auto">
@@ -49,7 +60,8 @@ function RequirePermission({ perm, children }: { perm: PermissionCode; children:
       </div>
       <p className="mt-3 text-[14px] font-medium text-ink-800">没有该模块的访问权限</p>
       <p className="mt-1 text-[12.5px] text-ink-500 max-w-md mx-auto leading-relaxed">
-        你的岗位角色未包含这个模块。如需访问，请让管理员在「人员与账号」里为你分配包含该模块的角色。
+        你的部门范围与岗位角色都不包含这个模块。如需访问，请联系管理员调整你所在部门的可见模块，
+        或为你分配包含该模块的角色。
       </p>
       <Link to="/" className="inline-block mt-4">
         <Button size="sm">返回运营概览</Button>
@@ -143,12 +155,13 @@ function AppRoutes() {
         <Route path="competitors" element={<RequirePermission perm="competitors.view"><Competitors /></RequirePermission>} />
         <Route path="profit" element={<RequirePermission perm="profit.view"><Profit /></RequirePermission>} />
         <Route path="tasks" element={<RequirePermission perm="tasks.view"><Tasks /></RequirePermission>} />
+        <Route path="performance" element={<Performance />} />
         {/* 组织架构对全员可见（通讯录），编辑按钮按 org.manage 收敛 */}
         <Route path="org" element={<Org />} />
         <Route
           path="accounts"
           element={
-            <RequirePermission perm="account.manage">
+            <RequirePermission anyOf={['account.manage', 'hr.view']}>
               <Accounts />
             </RequirePermission>
           }

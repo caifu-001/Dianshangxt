@@ -118,8 +118,10 @@ function employmentOf(p: Profile): EmploymentStatus {
 }
 
 export default function Accounts() {
-  const { user, profile: me, role, isSuperAdmin } = useAuth()
+  const { user, profile: me, role, isSuperAdmin, can } = useAuth()
   const { push } = useToast()
+  const canAdmin = can('account.manage')
+  const canHr = can('hr.manage')
 
   const { data, loading, error, reload } = useAsync(async () => {
     const [profiles, departments, positions, roles] = await Promise.all([
@@ -133,6 +135,7 @@ export default function Accounts() {
 
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<'all' | 'active' | 'pending' | 'left'>('all')
+  const [deptFilter, setDeptFilter] = useState('')
   const [busyId, setBusyId] = useState<string | null>(null)
   const [removing, setRemoving] = useState<Profile | null>(null)
   const [removeLoading, setRemoveLoading] = useState(false)
@@ -164,6 +167,7 @@ export default function Accounts() {
     return list.filter((p) => {
       const status = employmentOf(p)
       if (filter !== 'all' && status !== filter) return false
+      if (deptFilter && (p.department_id ?? '') !== deptFilter) return false
       if (!q) return true
       const dept = p.department_id ? deptById.get(p.department_id)?.name ?? '' : ''
       const pos = p.position_id ? posById.get(p.position_id)?.name ?? '' : ''
@@ -174,7 +178,7 @@ export default function Accounts() {
         pos.includes(q)
       )
     })
-  }, [list, query, filter, deptById, posById])
+  }, [list, query, filter, deptFilter, deptById, posById])
 
   const stats = useMemo(() => {
     const byStatus = (s: EmploymentStatus) => list.filter((p) => employmentOf(p) === s).length
@@ -189,6 +193,14 @@ export default function Accounts() {
   }, [list])
 
   const roleOptions = assignableRoles(role)
+
+  /**
+   * 人事岗（hr.manage）只能办理普通人员的人事事务：
+   * 入职、离职、调部门 / 岗位、启停账号；不能调整系统角色与岗位角色。
+   */
+  function hrOperableOn(target: Profile) {
+    return canHr && normalizeRole(target.role) === 'member' && target.id !== user?.id
+  }
 
   async function changeRole(target: Profile, next: Role) {
     if (normalizeRole(target.role) === next) return
@@ -285,13 +297,15 @@ export default function Accounts() {
     if (!orgForm) return
     setOrgSaving(true)
     try {
-      await updateRow<Profile>('profiles', orgForm.id, {
+      const payload: Record<string, unknown> = {
         department_id: orgForm.department_id || null,
         position_id: orgForm.position_id || null,
-        role_id: orgForm.role_id || null,
         note: orgForm.note.trim() || null,
-      })
-      push('组织信息已更新')
+      }
+      // 岗位角色决定业务权限，只有管理员能改；HR 调岗只动部门与岗位
+      if (canAdmin) payload.role_id = orgForm.role_id || null
+      await updateRow<Profile>('profiles', orgForm.id, payload)
+      push(canAdmin ? '组织信息已更新' : '部门与岗位已更新')
       setOrgForm(null)
       reload()
     } catch (err) {
@@ -464,13 +478,19 @@ export default function Accounts() {
     <div>
       <PageHeader
         title="人员与账号"
-        description="管理员可直接开通账号，办理入职 / 离职，离职时把名下资源移交给接手人并回收权限。"
+        description={
+          canAdmin
+            ? '开通账号、分配部门与角色，办理入职 / 离职；离职时把名下资源移交给接手人并回收权限。'
+            : '人事岗可以办理入职 / 离职与调岗，系统角色与岗位角色仍由管理员分配。'
+        }
         actions={
           <>
             <SearchInput value={query} onChange={setQuery} placeholder="搜索姓名 / 邮箱 / 部门" className="w-56" />
-            <Button variant="primary" icon={<UserPlus className="w-3.5 h-3.5" />} onClick={openCreate}>
-              新建账号
-            </Button>
+            {canAdmin && (
+              <Button variant="primary" icon={<UserPlus className="w-3.5 h-3.5" />} onClick={openCreate}>
+                新建账号
+              </Button>
+            )}
           </>
         }
       />
@@ -491,13 +511,16 @@ export default function Accounts() {
         <ShieldCheck className="w-3.5 h-3.5 text-brand-600 mt-0.5 shrink-0" />
         <p className="text-[11.5px] leading-relaxed text-ink-600">
           <b className="text-ink-800">系统角色</b>决定管理级别：超管全权、管理员可管人、普通人员不可管人；
-          <b className="text-ink-800 ml-1.5">岗位角色</b>决定业务范围：能看到哪些模块、能不能删数据。两者叠加生效。
+          <b className="text-ink-800 ml-1.5">部门范围</b>决定团队能看哪些模块（组织架构 → 权限总览里配）；
+          <b className="text-ink-800 ml-1.5">岗位角色</b>再给个人额外的业务范围。三者叠加生效。
           <br />
-          账号由管理员在这里直接开通，不用再让同事自助注册；初始密码交给本人后，建议勾选「首次登录必须改密」。
+          {canAdmin
+            ? '账号由管理员在这里直接开通，不用再让同事自助注册；初始密码交给本人后，建议勾选「首次登录必须改密」。'
+            : '人事岗可以确认入职、办理离职交接、调整部门与岗位；系统角色与岗位角色需要管理员分配。'}
         </p>
       </div>
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex flex-wrap items-center gap-2 mb-3">
         <Segmented
           value={filter}
           onChange={(v) => setFilter(v as typeof filter)}
@@ -509,6 +532,17 @@ export default function Accounts() {
             { value: 'left', label: `已离职 ${stats.left}` },
           ]}
         />
+        <Select
+          value={deptFilter}
+          onChange={setDeptFilter}
+          options={[{ value: '', label: '全部部门' }, ...departments.map((d) => ({ value: d.id, label: d.name }))]}
+          className="!h-8 w-[150px] text-[12px]"
+        />
+        {deptFilter && (
+          <span className="text-[11px] text-ink-400">
+            {deptById.get(deptFilter)?.name} · {filtered.length} 人
+          </span>
+        )}
       </div>
 
       <div className="card overflow-hidden">
@@ -536,6 +570,8 @@ export default function Accounts() {
                   const targetRole = normalizeRole(p.role)
                   const mine = p.id === user?.id
                   const operable = canOperateOn(role, p, user?.id)
+                  const hrOperable = hrOperableOn(p)
+                  const canAct = operable || hrOperable
                   const status = employmentOf(p)
                   const left = status === 'left'
                   const roleEditable = operable && !left
@@ -640,12 +676,12 @@ export default function Accounts() {
 
                       <td className="px-4 py-2.5">
                         <div className="flex items-center justify-end gap-0.5 whitespace-nowrap">
-                          {operable ? (
+                          {canAct ? (
                             <>
                               {!left && (
                                 <button
                                   className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50"
-                                  title="部门 / 岗位 / 角色"
+                                  title={operable ? '部门 / 岗位 / 角色' : '部门 / 岗位'}
                                   disabled={busy}
                                   onClick={() => openOrg(p)}
                                 >
@@ -691,7 +727,7 @@ export default function Accounts() {
                                   </button>
                                 </>
                               )}
-                              {isSuperAdmin && (
+                              {isSuperAdmin && operable && (
                                 <button
                                   className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
                                   title="移除档案"
@@ -720,8 +756,8 @@ export default function Accounts() {
         当前你的系统角色：<b className="text-ink-600">{ROLE_META[role].label}</b>（{ROLE_META[role].desc}）
         {me?.email ? ` · ${me.email}` : ''}
         <br />
-        所有校验都在数据库层完成（RLS + 触发器 + 离职交接函数），绕过界面直接调接口同样会被拒绝；
-        人事字段与组织归属只能由管理员修改，成员无法给自己提权或改回在职状态。
+        所有校验都在数据库层完成（RLS + 权限函数 + 触发器 + 离职交接函数），绕过界面直接调接口同样会被拒绝；
+        系统角色与岗位角色只有管理员能改，人事岗只能办理入离职与调岗，成员无法给自己提权或改回在职状态。
       </p>
 
       {/* ---------- 新建账号 ---------- */}
@@ -968,12 +1004,16 @@ export default function Accounts() {
                 />
               </Field>
             </div>
-            <Field label="岗位角色" hint="决定该成员能看到哪些业务模块；留空则按系统角色默认权限">
+            <Field
+              label="岗位角色"
+              hint={canAdmin ? '决定该成员能看到哪些业务模块；留空则按系统角色默认权限' : '岗位角色由管理员分配，人事岗只能调整部门与岗位'}
+            >
               <Select
                 value={orgForm.role_id}
                 onChange={(v) => setOrgForm({ ...orgForm, role_id: v })}
                 options={roles.map((r) => ({ value: r.id, label: r.name }))}
                 placeholder="默认（按系统角色）"
+                disabled={!canAdmin}
               />
             </Field>
             <Field label="备注">

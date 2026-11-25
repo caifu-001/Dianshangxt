@@ -20,6 +20,7 @@ import {
   ShoppingCart,
   Store as StoreIcon,
   Telescope,
+  Target,
   Truck,
   UserCog,
   Users,
@@ -41,6 +42,8 @@ const NAV_GROUPS: Array<{
     badge?: string
     /** 需要该权限码才显示；不填表示全员可见 */
     perm?: PermissionCode
+    /** 满足任意一个权限码即显示（部门职能、管理权限等组合场景） */
+    perms?: PermissionCode[]
   }>
 }> = [
   {
@@ -73,9 +76,15 @@ const NAV_GROUPS: Array<{
     title: '协同',
     items: [
       { to: '/tasks', label: '任务看板', icon: CheckSquare, perm: 'tasks.view' },
+    ],
+  },
+  {
+    title: '组织',
+    items: [
+      { to: '/performance', label: '绩效管理', icon: Target },
       { to: '/org', label: '组织架构', icon: Network },
+      { to: '/accounts', label: '人员与账号', icon: UserCog, perms: ['account.manage', 'hr.view'] },
       { to: '/access', label: '权限流程', icon: ShieldCheck },
-      { to: '/accounts', label: '人员与账号', icon: UserCog, perm: 'account.manage' },
     ],
   },
 ]
@@ -114,7 +123,10 @@ export default function AppLayout() {
   const visibleGroups = NAV_GROUPS.map((group) => ({
     ...group,
     items: group.items
-      .filter((item) => !item.perm || can(item.perm))
+      .filter((item) => {
+        if (item.perms && item.perms.length > 0) return item.perms.some((code) => can(code))
+        return !item.perm || can(item.perm)
+      })
       .map((item) =>
         item.to === '/access' && pendingApprovals > 0
           ? { ...item, badge: String(pendingApprovals) }

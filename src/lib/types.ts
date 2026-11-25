@@ -74,6 +74,12 @@ export interface Department {
   parent_id: string | null
   leader_id: string | null
   description: string | null
+  /** 部门编码：IT / HR / OPS / FIN ... */
+  code?: string | null
+  /** 部门级权限码：模块可见范围 + 人事职能（hr.view / hr.manage） */
+  scope?: string[]
+  /** 是否继承上级部门的可见范围，默认 true */
+  inherit_parent?: boolean
   sort_order: number
   created_at: string
 }
@@ -96,6 +102,28 @@ export interface RoleDef {
   is_system: boolean
   sort_order: number
   created_at: string
+}
+
+/* ---------------- 绩效 ---------------- */
+
+export type PerformanceGrade = 'S' | 'A' | 'B' | 'C' | 'D'
+
+export interface PerformanceReview {
+  id: string
+  profile_id: string
+  /** 考核周期：2026-Q4 / 2026-11 */
+  period: string
+  /** 评估时的部门快照，避免调岗后历史报表被改写 */
+  department_id: string | null
+  reviewer_id: string | null
+  score: number
+  grade: PerformanceGrade
+  kpi: Record<string, number>
+  summary: string | null
+  improvement: string | null
+  status: 'draft' | 'published'
+  created_at: string
+  updated_at: string
 }
 
 export interface Store {
