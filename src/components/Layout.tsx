@@ -105,7 +105,7 @@ const NAV_GROUPS: Array<{
 ]
 
 export default function AppLayout() {
-  const { profile, user, signOut, schemaReady, role, isSuperAdmin, can, customRole, mustChangePassword } = useAuth()
+  const { profile, user, signOut, schemaReady, role, isSuperAdmin, can, customRole, mustChangePassword, currentCompany } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [pendingApprovals, setPendingApprovals] = useState(0)
@@ -292,6 +292,16 @@ export default function AppLayout() {
             </div>
 
             <div className="ml-auto flex items-center gap-2">
+              {currentCompany && (
+                <div
+                  className="hidden sm:flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-ink-50 border border-ink-200/70"
+                  title={`所属公司：${currentCompany.name}${currentCompany.code ? `（${currentCompany.code}）` : ''}`}
+                >
+                  <Building2 className="w-3.5 h-3.5 text-brand-600 shrink-0" />
+                  <span className="text-xs font-medium text-ink-700 max-w-[130px] truncate">{currentCompany.name}</span>
+                  {isSuperAdmin && <span className="text-[10px] text-ink-400 shrink-0">视角</span>}
+                </div>
+              )}
               <Badge tone="gray" className="hidden md:inline-flex">
                 专业版 · 内部使用
               </Badge>
@@ -309,10 +319,20 @@ export default function AppLayout() {
                 {menuOpen && (
                   <>
                     <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-                    <div className="absolute right-0 top-full mt-1.5 w-52 bg-white border border-ink-200 rounded-xl shadow-pop py-1 z-20 animate-scale-in">
+                    <div className="absolute right-0 top-full mt-1.5 w-60 bg-white border border-ink-200 rounded-xl shadow-pop py-1 z-20 animate-scale-in">
                       <div className="px-3 py-2 border-b border-ink-100">
                         <p className="text-xs font-medium text-ink-800 truncate">{displayName}</p>
                         <p className="text-[11px] text-ink-400 truncate">{user?.email}</p>
+                        {currentCompany && (
+                          <p
+                            className="mt-1.5 flex items-center gap-1 text-[11px] text-ink-500"
+                            title={`所属公司：${currentCompany.name}`}
+                          >
+                            <Building2 className="w-3 h-3 shrink-0 text-ink-400" />
+                            <span className="truncate">{currentCompany.name}</span>
+                            {isSuperAdmin && <span className="text-ink-400 shrink-0">· 管理视角</span>}
+                          </p>
+                        )}
                       </div>
                       <Link to="/settings" className="flex items-center gap-2 px-3 py-2 text-[13px] text-ink-600 hover:bg-ink-50">
                         <Settings className="w-3.5 h-3.5" />

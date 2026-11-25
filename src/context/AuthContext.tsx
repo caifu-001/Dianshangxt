@@ -2,8 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import type { ReactNode } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
-import { checkSchema, fetchRows } from '../lib/db'
-import type { Profile, RoleDef } from '../lib/types'
+import { callRpc, checkSchema, fetchRows } from '../lib/db'
+import type { Company, Profile, RoleDef } from '../lib/types'
 import {
   type PermissionCode,
   type Role,
@@ -27,6 +27,8 @@ interface AuthContextValue {
   isSuperAdmin: boolean
   /** 当前数据视角所属公司：普通账号=所属公司，平台超管=切换后的公司 */
   currentCompanyId: string | null
+  /** 当前公司的展示信息（名称 / 编码 / 状态等），旧库未建 my_company 时为 null */
+  currentCompany: Company | null
   /** 有效权限码（系统角色上限 ∩ 自定义角色范围） */
   permissions: PermissionCode[]
   /** 权限判定，界面可见性统一走这里 */
@@ -62,6 +64,7 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [currentCompany, setCurrentCompany] = useState<Company | null>(null)
   const [loading, setLoading] = useState(true)
   const [schemaReady, setSchemaReady] = useState(true)
   const [schemaMessage, setSchemaMessage] = useState<string | null>(null)
@@ -94,6 +97,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  /** 当前公司展示信息：旧库还没有 my_company() 时静默降级，不影响登录 */
+  const loadMyCompany = useCallback(async () => {
+    try {
+      const rows = await callRpc<Company[]>('my_company')
+      setCurrentCompany(rows[0] ?? null)
+    } catch {
+      setCurrentCompany(null)
+    }
+  }, [])
+
   const loadProfile = useCallback(async (userId: string) => {
     try {
       const rows = await fetchRows<Profile>('profiles', { filters: [['id', 'eq', userId]], limit: 1 })
@@ -105,10 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       else if (next.status === 'pending') setBlocked('pending')
       else setBlocked(null)
       await loadDeptScope(next?.department_id)
+      void loadMyCompany()
     } catch {
       setProfile(null)
     }
-  }, [loadDeptScope])
+  }, [loadDeptScope, loadMyCompany])
 
   // 自定义角色表：全员可读，用于把 profile.role_id 解析成具体权限
   const loadRoles = useCallback(async () => {
@@ -147,6 +161,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSession(nextSession)
       if (event === 'SIGNED_OUT') {
         setProfile(null)
+        setCurrentCompany(null)
       } else if (nextSession?.user) {
         void loadProfile(nextSession.user.id)
       }
@@ -288,6 +303,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         checkSuper(role)
           ? profile?.active_company_id ?? '00000000-0000-0000-0000-000000000001'
           : profile?.company_id ?? null,
+      currentCompany,
       permissions,
       can: (code: PermissionCode) => allowed.has(code),
       customRole,
@@ -304,7 +320,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       refreshProfile,
     }
   }, [
-    session, profile, role, permissions, customRole, deptPermissions, loading, schemaReady, schemaMessage, blocked,
+    session, profile, currentCompany, role, permissions, customRole, deptPermissions, loading, schemaReady, schemaMessage, blocked,
     recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile,
   ])
 

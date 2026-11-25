@@ -1414,6 +1414,24 @@ as $$
    order by c.created_at;
 $$;
 
+-- 当前用户所属公司（只读）：普通账号 = 所属公司，平台超管 = 当前管理视角公司。
+-- companies 是平台级表、普通账号受 RLS 不可直读，这里用 security definer 只放行自己这一行，
+-- 且不暴露其它公司；pending / disabled 账号由 is_active_user() 挡住。
+create or replace function public.my_company()
+returns table (
+  id uuid, name text, code text, status text, note text,
+  member_count bigint, created_at timestamptz
+)
+language sql stable security definer set search_path = public
+as $$
+  select c.id, c.name, c.code, c.status, c.note,
+         (select count(*) from public.profiles p where p.company_id = c.id),
+         c.created_at
+    from public.companies c
+   where c.id = public.current_company_id()
+     and public.is_active_user();
+$$;
+
 create or replace function public.create_company(p_name text, p_code text default null, p_note text default null)
 returns uuid
 language plpgsql security definer set search_path = public
@@ -3647,6 +3665,7 @@ grant execute on function public.current_company_id() to authenticated;
 grant execute on function public.in_company(uuid) to authenticated;
 grant execute on function public.assert_row_company(text, uuid) to authenticated;
 grant execute on function public.list_companies() to authenticated;
+grant execute on function public.my_company() to authenticated;
 grant execute on function public.create_company(text, text, text) to authenticated;
 grant execute on function public.update_company(uuid, text, text, text, text) to authenticated;
 grant execute on function public.switch_company(uuid) to authenticated;

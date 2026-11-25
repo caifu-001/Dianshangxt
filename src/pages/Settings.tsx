@@ -75,7 +75,7 @@ const COUNTS: Array<{ table: string; label: string }> = [
 ]
 
 export default function Settings() {
-  const { user, profile, refreshProfile, schemaReady, changePassword, can } = useAuth()
+  const { user, profile, refreshProfile, schemaReady, changePassword, can, currentCompany, isSuperAdmin } = useAuth()
   // 汇率、演示数据、清空数据属于系统级操作，由 system.manage 权限决定
   const canManageSystem = can('system.manage')
   const { push } = useToast()
@@ -368,7 +368,7 @@ export default function Settings() {
           <Field label="你的称呼">
             <input className="input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="如：老王" />
           </Field>
-          <Field label="公司 / 团队">
+          <Field label="公司 / 团队（资料备注）" hint="可填写部门或团队名；系统归属公司以「所属公司」卡片为准">
             <input className="input" value={company} onChange={(e) => setCompany(e.target.value)} placeholder="如：星野跨境" />
           </Field>
           <div className="sm:col-span-2 flex items-center gap-2">
@@ -377,6 +377,48 @@ export default function Settings() {
             </Button>
             <span className="text-[11px] text-ink-400">称呼会显示在左侧边栏与任务负责人推荐中</span>
           </div>
+        </div>
+      </div>
+
+      <div className="card mt-3 overflow-hidden">
+        <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
+          <Building2 className="w-4 h-4 text-ink-400" />
+          <h3 className="text-[13.5px] font-semibold text-ink-900">所属公司</h3>
+          {isSuperAdmin && <Badge tone="gray">当前管理视角</Badge>}
+        </div>
+        <div className="p-4">
+          {currentCompany ? (
+            <div className="grid sm:grid-cols-2 gap-3">
+              <Field label="公司名称">
+                <input className="input bg-ink-50 text-ink-500" value={currentCompany.name} disabled />
+              </Field>
+              <Field label="公司编码">
+                <input className="input bg-ink-50 text-ink-500" value={currentCompany.code || '—'} disabled />
+              </Field>
+              <Field label="公司状态">
+                <input
+                  className="input bg-ink-50 text-ink-500"
+                  value={currentCompany.status === 'active' ? '正常启用' : '已停用'}
+                  disabled
+                />
+              </Field>
+              <Field label="成员数量">
+                <input className="input bg-ink-50 text-ink-500" value={`${currentCompany.member_count ?? 0} 人`} disabled />
+              </Field>
+              <div className="sm:col-span-2">
+                <Field label="创建时间">
+                  <input className="input bg-ink-50 text-ink-500" value={fmtDateTime(currentCompany.created_at)} disabled />
+                </Field>
+              </div>
+              <p className="sm:col-span-2 text-[11px] text-ink-400 leading-relaxed">
+                这是你的账号在公司体系中的真实归属，右上角也同步显示。公司信息由平台统一管理，如需修改请联系超级管理员。
+              </p>
+            </div>
+          ) : (
+            <p className="text-[12px] text-ink-500 leading-relaxed">
+              当前账号未归属任何公司，或数据库还未升级到多租户版本。请到「数据源」页执行最新脚本后再查看。
+            </p>
+          )}
         </div>
       </div>
 
