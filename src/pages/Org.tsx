@@ -470,7 +470,7 @@ export default function Org() {
             <EmptyState
               icon={<Building2 className="w-5 h-5" />}
               title="还没有部门"
-              description="按团队实际分工建几个部门，再把成员归入对应部门，账号管理页就能按部门筛选。"
+              description="按团队实际分工建几个部门，再把成员归入对应部门，人员与账号页就能按部门筛选。"
               action={
                 editable ? (
                   <Button size="sm" variant="primary" onClick={() => openDept({})}>
@@ -501,7 +501,7 @@ export default function Org() {
             <EmptyState
               icon={<Briefcase className="w-5 h-5" />}
               title="还没有岗位"
-              description="岗位用来描述职责与职级，例如「高级运营 P5」，成员可以在账号管理页挂上。"
+              description="岗位用来描述职责与职级，例如「高级运营 P5」，成员可以在人员与账号页挂上。"
               action={
                 editable ? (
                   <Button size="sm" variant="primary" onClick={() => openPos({})}>
@@ -576,7 +576,7 @@ export default function Org() {
           <div className="card px-3.5 py-2.5 flex items-start gap-2">
             <Info className="w-3.5 h-3.5 text-brand-500 mt-0.5 shrink-0" />
             <p className="text-[11.5px] leading-relaxed text-ink-600">
-              角色决定成员<b className="text-ink-800">能看到哪些模块</b>，账号管理页把角色分配给成员后立即生效（成员刷新页面）。
+              角色决定成员<b className="text-ink-800">能看到哪些模块</b>，人员与账号页把角色分配给成员后立即生效（成员刷新页面）。
               内置角色可以改权限、不能删除；「管理账号」「管理组织架构」「系统配置」三项由系统角色决定，不需要在角色里配置。
             </p>
           </div>
@@ -594,7 +594,7 @@ export default function Org() {
               <EmptyState
                 icon={<ShieldCheck className="w-5 h-5" />}
                 title="还没有自定义角色"
-                description="建一个角色，勾选它能访问的模块，然后在账号管理页分配给成员。"
+                description="建一个角色，勾选它能访问的模块，然后在人员与账号页分配给成员。"
                 action={
                   editable ? (
                     <Button size="sm" variant="primary" onClick={() => openRole({})}>

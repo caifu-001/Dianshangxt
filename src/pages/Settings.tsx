@@ -236,7 +236,7 @@ export default function Settings() {
           <Info className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
           <p className="text-[11.5px] leading-relaxed text-amber-800">
             你的角色没有<b>系统配置</b>权限：可以维护自己的资料与密码，汇率、演示数据、清空数据等操作需要管理员权限。
-            如需调整，请让管理员在「账号管理」中为你调整系统角色。
+            如需调整，请让管理员在「人员与账号」中为你调整系统角色。
           </p>
         </div>
       )}

@@ -440,6 +440,16 @@ export async function seedDemoData() {
       position_id: pos.id,
       role_id: role?.id ?? null,
     })
+
+    // 人事字段单独写：旧库还没有这几列时只跳过这一句，不影响上面的组织归属
+    try {
+      await updateRow('profiles', uid, {
+        hire_date: daysAgo(560),
+        employment_status: 'active',
+      })
+    } catch {
+      // 旧库没有 employment_status / hire_date 列
+    }
   } catch {
     // 组织架构表还没建：忽略，不影响业务数据的生成
   }

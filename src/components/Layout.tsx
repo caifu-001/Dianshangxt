@@ -7,6 +7,7 @@ import {
   ChevronDown,
   CheckSquare,
   Database,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Megaphone,
@@ -14,6 +15,7 @@ import {
   Network,
   Package,
   Settings,
+  ShieldCheck,
   ShoppingCart,
   Store as StoreIcon,
   Telescope,
@@ -23,6 +25,7 @@ import {
   X,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { fetchRows } from '../lib/db'
 import { ROLE_META, type PermissionCode } from '../lib/permissions'
 import { cn, initials } from '../lib/utils'
 import { Badge } from './ui'
@@ -69,15 +72,17 @@ const NAV_GROUPS: Array<{
     items: [
       { to: '/tasks', label: '任务看板', icon: CheckSquare, perm: 'tasks.view' },
       { to: '/org', label: '组织架构', icon: Network },
-      { to: '/accounts', label: '账号管理', icon: UserCog, perm: 'account.manage' },
+      { to: '/access', label: '权限流程', icon: ShieldCheck },
+      { to: '/accounts', label: '人员与账号', icon: UserCog, perm: 'account.manage' },
     ],
   },
 ]
 
 export default function AppLayout() {
-  const { profile, user, signOut, schemaReady, role, can, customRole } = useAuth()
+  const { profile, user, signOut, schemaReady, role, can, customRole, mustChangePassword } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [pendingApprovals, setPendingApprovals] = useState(0)
   const location = useLocation()
 
   useEffect(() => {
@@ -85,12 +90,34 @@ export default function AppLayout() {
     setMenuOpen(false)
   }, [location.pathname])
 
+  // 待审批的权限申请数：只拉 id 列，切换页面时刷新一次，管理员才需要
+  useEffect(() => {
+    if (!can('account.manage')) return
+    let alive = true
+    fetchRows<{ id: string }>('access_requests', { columns: 'id', filters: [['status', 'eq', 'pending']] })
+      .then((rows) => {
+        if (alive) setPendingApprovals(rows.length)
+      })
+      .catch(() => {
+        // 旧库还没有 access_requests 表，忽略
+      })
+    return () => {
+      alive = false
+    }
+  }, [can, location.pathname])
+
   const displayName = profile?.full_name || user?.email?.split('@')[0] || '运营同学'
 
   // 菜单按权限码收敛：自定义角色看不到的模块，入口也不出现
   const visibleGroups = NAV_GROUPS.map((group) => ({
     ...group,
-    items: group.items.filter((item) => !item.perm || can(item.perm)),
+    items: group.items
+      .filter((item) => !item.perm || can(item.perm))
+      .map((item) =>
+        item.to === '/access' && pendingApprovals > 0
+          ? { ...item, badge: String(pendingApprovals) }
+          : item,
+      ),
   })).filter((group) => group.items.length > 0)
 
   const sidebar = (
@@ -285,6 +312,22 @@ export default function AppLayout() {
                 数据库还没升级到组织架构版本，部门 / 岗位 / 自定义角色暂不可用（当前按系统角色默认权限运行）。
                 请到 <Link to="/setup" className="underline font-medium">数据源</Link> 页复制最新脚本，
                 在 Supabase SQL Editor 重新执行一次即可启用。
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* 管理员代建账号发出的一次性初始密码，登录后提醒本人尽快改掉 */}
+        {mustChangePassword && (
+          <div className="px-4 sm:px-6 pt-4">
+            <div className="rounded-xl border border-amber-200/80 bg-amber-50 px-3.5 py-2.5 flex items-start gap-2">
+              <KeyRound className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
+              <p className="text-[11.5px] leading-relaxed text-amber-800">
+                你正在使用管理员下发的初始密码。为了账号安全，请先到
+                <Link to="/settings" className="mx-1 underline font-medium">
+                  系统设置 → 修改密码
+                </Link>
+                改成只有自己知道的密码，改完这条提示会自动消失。
               </p>
             </div>
           </div>

@@ -30,6 +30,8 @@ interface AuthContextValue {
   can: (code: PermissionCode) => boolean
   /** 分配的自定义角色（岗位角色），未分配为 null */
   customRole: RoleDef | null
+  /** 管理员代建的账号首次登录时要求先改掉初始密码 */
+  mustChangePassword: boolean
   /** 账号被禁用或档案被移除时非空，用于阻断进入工作台 */
   blocked: 'disabled' | 'missing' | null
   recheckSchema: () => Promise<boolean>
@@ -121,7 +123,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signIn = useCallback(async (email: string, password: string) => {
     const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw new Error(translateAuthError(error.message))
-    // 记录最近登录时间，供账号管理页做审计（失败不影响登录）
+    // 记录最近登录时间，供人员与账号页做审计（失败不影响登录）
     if (data.user) {
       void supabase
         .from('profiles')
@@ -177,8 +179,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (verifyError) throw new Error('当前密码不正确')
       const { error } = await supabase.auth.updateUser({ password: next })
       if (error) throw new Error(translateAuthError(error.message))
+
+      // 首登强制改密的标记挂在 profiles.settings 里，改完就清掉，
+      // 否则每次登录都会再弹一次
+      if (profile?.settings && (profile.settings as Record<string, unknown>).must_change_password) {
+        const nextSettings = { ...(profile.settings as Record<string, unknown>), must_change_password: false }
+        await supabase.from('profiles').update({ settings: nextSettings }).eq('id', profile.id)
+        setProfile((prev) => (prev ? { ...prev, settings: nextSettings } : prev))
+      }
     },
-    [session?.user?.email],
+    [session?.user?.email, profile],
   )
 
   const signOut = useCallback(async () => {
@@ -226,6 +236,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       permissions,
       can: (code: PermissionCode) => allowed.has(code),
       customRole,
+      mustChangePassword: Boolean((profile?.settings as Record<string, unknown> | undefined)?.must_change_password),
       blocked,
       recheckSchema,
       signIn,

@@ -1,5 +1,7 @@
 export type Platform = 'amazon' | 'tiktok'
 
+export type EmploymentStatus = 'pending' | 'active' | 'left'
+
 export interface Profile {
   id: string
   email: string | null
@@ -15,6 +17,53 @@ export interface Profile {
   department_id?: string | null
   position_id?: string | null
   role_id?: string | null
+  /** 人事状态：待入职 / 在职 / 已离职（旧库为 undefined，按在职处理） */
+  employment_status?: EmploymentStatus
+  hire_date?: string | null
+  left_at?: string | null
+  left_reason?: string | null
+  handover_to?: string | null
+  provisioned_by?: string | null
+  provisioned_at?: string | null
+}
+
+/* ---------------- 权限流程 ---------------- */
+
+export type AccessRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled'
+
+export interface AccessRequest {
+  id: string
+  user_id: string
+  /** role = 申请岗位角色；system_role = 申请系统角色 */
+  kind: 'role' | 'system_role'
+  target_role_id: string | null
+  target_role: 'admin' | 'member' | null
+  reason: string
+  expect_scope: string | null
+  status: AccessRequestStatus
+  decided_by: string | null
+  decided_at: string | null
+  decision_note: string | null
+  created_at: string
+}
+
+export type EmployeeEventType =
+  | 'hire'
+  | 'activate'
+  | 'transfer'
+  | 'permission'
+  | 'disable'
+  | 'enable'
+  | 'offboard'
+
+export interface EmployeeEvent {
+  id: string
+  profile_id: string
+  event_type: EmployeeEventType
+  summary: string
+  detail: Record<string, unknown>
+  actor_id: string | null
+  created_at: string
 }
 
 /* ---------------- 组织架构 ---------------- */

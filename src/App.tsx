@@ -19,6 +19,7 @@ import Competitors from './pages/Competitors'
 import Profit from './pages/Profit'
 import Tasks from './pages/Tasks'
 import Accounts from './pages/Accounts'
+import AccessFlow from './pages/AccessFlow'
 import Org from './pages/Org'
 import Settings from './pages/Settings'
 
@@ -47,7 +48,7 @@ function RequirePermission({ perm, children }: { perm: PermissionCode; children:
       </div>
       <p className="mt-3 text-[14px] font-medium text-ink-800">没有该模块的访问权限</p>
       <p className="mt-1 text-[12.5px] text-ink-500 max-w-md mx-auto leading-relaxed">
-        你的岗位角色未包含这个模块。如需访问，请让管理员在「账号管理」里为你分配包含该模块的角色。
+        你的岗位角色未包含这个模块。如需访问，请让管理员在「人员与账号」里为你分配包含该模块的角色。
       </p>
       <Link to="/" className="inline-block mt-4">
         <Button size="sm">返回运营概览</Button>
@@ -69,7 +70,7 @@ function AccountBlocked({ kind, onSignOut }: { kind: 'disabled' | 'missing'; onS
         <p className="mt-2 text-[13px] leading-relaxed text-ink-500">
           {kind === 'disabled'
             ? '管理员已停用你的账号，业务数据暂时不可访问。需要恢复请联系团队的超级管理员。'
-            : '登录凭据有效，但系统中查不到对应的成员档案。请联系管理员在「账号管理」中恢复你的账号。'}
+            : '登录凭据有效，但系统中查不到对应的成员档案。请联系管理员在「人员与账号」中恢复你的账号。'}
         </p>
         <Button className="mt-5" onClick={onSignOut} icon={<LogOut className="w-3.5 h-3.5" />}>
           退出登录
@@ -141,6 +142,8 @@ function AppRoutes() {
             </RequirePermission>
           }
         />
+        {/* 权限流程全员可见：普通成员在这里提交申请、看自己的变动记录 */}
+        <Route path="access" element={<AccessFlow />} />
         <Route path="settings" element={<Settings />} />
         <Route path="setup" element={<Setup />} />
         <Route path="*" element={<Navigate to="/" replace />} />

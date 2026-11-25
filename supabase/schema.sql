@@ -330,6 +330,25 @@ create index if not exists idx_profiles_position   on public.profiles(position_i
 create index if not exists idx_profiles_role_id    on public.profiles(role_id);
 
 -- -------------------------------------------------------------
+-- 10.1 人员生命周期（入职 / 在职 / 离职）
+--      status 管「账号能不能登录」，employment_status 管「人还在这家公司吗」，
+--      两者解耦：休假停用账号时人事状态仍是 active，不会误记成离职。
+-- -------------------------------------------------------------
+alter table public.profiles add column if not exists employment_status text not null default 'active';
+alter table public.profiles add column if not exists hire_date    date;          -- 入职日期
+alter table public.profiles add column if not exists left_at      timestamptz;   -- 离职生效时间
+alter table public.profiles add column if not exists left_reason  text;          -- 离职原因
+alter table public.profiles add column if not exists handover_to  uuid references public.profiles(id) on delete set null;
+alter table public.profiles add column if not exists provisioned_by uuid references auth.users(id) on delete set null;
+alter table public.profiles add column if not exists provisioned_at timestamptz; -- 由管理员创建账号的时间
+
+alter table public.profiles drop constraint if exists profiles_employment_check;
+alter table public.profiles add  constraint profiles_employment_check
+  check (employment_status in ('pending', 'active', 'left'));
+
+create index if not exists idx_profiles_employment on public.profiles(employment_status);
+
+-- -------------------------------------------------------------
 -- 11. 竞品分析：跟踪竞品的价格 / 评分 / BSR
 --     competitors 存最近一次采集值（列表页直接读，避免每次汇总）
 --     competitor_snapshots 存按日快照，用于画趋势曲线
@@ -447,6 +466,43 @@ create table if not exists public.purchase_items (
 create index if not exists idx_purchase_items_po  on public.purchase_items(po_id);
 create index if not exists idx_purchase_items_sku on public.purchase_items(sku);
 
+-- -------------------------------------------------------------
+-- 13. 权限流程：权限申请与审批 / 人员变动流水
+--     access_requests 记录「谁申请了哪个角色、为什么、谁批的」
+--     employee_events 记录入职、调岗、权限变更、离职等无法回滚的轨迹
+--     两者都只追加不修改，作为审计底稿
+-- -------------------------------------------------------------
+create table if not exists public.access_requests (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  kind           text not null default 'role' check (kind in ('role', 'system_role')),
+  target_role_id uuid references public.roles(id) on delete set null,   -- 申请岗位角色
+  target_role    text check (target_role in ('admin', 'member')),        -- 申请系统角色（超管不可申请）
+  reason         text not null,
+  expect_scope   text,                                                   -- 申请人写的期望权限范围
+  status         text not null default 'pending'
+                 check (status in ('pending', 'approved', 'rejected', 'cancelled')),
+  decided_by     uuid references auth.users(id) on delete set null,
+  decided_at     timestamptz,
+  decision_note  text,
+  created_at     timestamptz not null default now()
+);
+create index if not exists idx_access_req_user   on public.access_requests(user_id);
+create index if not exists idx_access_req_status on public.access_requests(status, created_at desc);
+
+create table if not exists public.employee_events (
+  id         uuid primary key default gen_random_uuid(),
+  profile_id uuid not null references public.profiles(id) on delete cascade,
+  event_type text not null
+             check (event_type in ('hire', 'activate', 'transfer', 'permission', 'disable', 'enable', 'offboard')),
+  summary    text not null,
+  detail     jsonb not null default '{}'::jsonb,
+  actor_id   uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_emp_events_profile on public.employee_events(profile_id, created_at desc);
+create index if not exists idx_emp_events_time    on public.employee_events(created_at desc);
+
 -- =============================================================
 --  行级安全（RLS）与角色权限
 --  权限模型：团队共享同一份业务数据，按角色控制「可删 / 可管人」
@@ -535,7 +591,7 @@ declare
     'profiles','stores','products','orders','inventory',
     'campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
-    'departments','positions','roles'
+    'departments','positions','roles','access_requests','employee_events'
   ];
 begin
   foreach t in array tabs loop
@@ -710,6 +766,306 @@ create policy "roles_delete" on public.roles
   for delete to authenticated
   using (public.has_permission('org.manage') and not is_system);
 
+-- ---------- 权限申请（access_requests） ----------
+drop policy if exists "access_req_select"      on public.access_requests;
+drop policy if exists "access_req_insert"      on public.access_requests;
+drop policy if exists "access_req_update_own"  on public.access_requests;
+drop policy if exists "access_req_update_staff" on public.access_requests;
+
+-- 本人看自己的申请；管账号的人看全部（审批列表）
+create policy "access_req_select" on public.access_requests
+  for select to authenticated
+  using (user_id = auth.uid() or public.has_permission('account.manage'));
+
+-- 只能给自己申请，且新建一律 pending：
+-- 否则可以伪造一条 approved 记录冒充审批结果
+create policy "access_req_insert" on public.access_requests
+  for insert to authenticated
+  with check (user_id = auth.uid() and status = 'pending');
+
+-- 申请人只能撤回自己的待审批申请
+create policy "access_req_update_own" on public.access_requests
+  for update to authenticated
+  using (user_id = auth.uid() and status = 'pending')
+  with check (user_id = auth.uid() and status in ('pending', 'cancelled'));
+
+create policy "access_req_update_staff" on public.access_requests
+  for update to authenticated
+  using (public.has_permission('account.manage'))
+  with check (public.has_permission('account.manage'));
+
+-- ---------- 人员变动流水（employee_events） ----------
+drop policy if exists "emp_events_select" on public.employee_events;
+
+-- 本人可见自己的轨迹，管理员可见全部；写入只发生在 security definer 函数里，
+-- 所以不开放 insert / update / delete 策略，前端无法伪造审计记录
+create policy "emp_events_select" on public.employee_events
+  for select to authenticated
+  using (profile_id = auth.uid() or public.has_permission('account.manage'));
+
+-- ---------- 档案变更自动留痕：入职 / 调岗 / 权限变更 / 停用 / 离职 ----------
+create or replace function public.log_profile_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  parts text[] := '{}';
+  etype text;
+begin
+  if tg_op = 'INSERT' then
+    insert into public.employee_events (profile_id, event_type, summary, detail, actor_id)
+    values (
+      new.id, 'hire', '账号档案创建',
+      jsonb_build_object('role', new.role, 'employment_status', new.employment_status),
+      auth.uid()
+    );
+    return new;
+  end if;
+
+  if new.status is distinct from old.status then
+    parts := array_append(parts, case when new.status = 'disabled' then '账号停用' else '账号启用' end);
+  end if;
+  if new.employment_status is distinct from old.employment_status then
+    parts := array_append(parts, case new.employment_status
+      when 'pending' then '标记为待入职'
+      when 'active'  then '转入在职'
+      else '标记为离职' end);
+  end if;
+  if new.role is distinct from old.role then
+    parts := array_append(parts, '系统角色 ' || old.role || ' → ' || new.role);
+  end if;
+  if new.role_id is distinct from old.role_id then
+    parts := array_append(parts, '岗位角色变更');
+  end if;
+  if new.department_id is distinct from old.department_id then
+    parts := array_append(parts, '部门变更');
+  end if;
+  if new.position_id is distinct from old.position_id then
+    parts := array_append(parts, '岗位变更');
+  end if;
+
+  if array_length(parts, 1) is null then
+    return new;
+  end if;
+
+  etype := case
+    when new.employment_status = 'left' and old.employment_status <> 'left' then 'offboard'
+    when new.employment_status = 'active' and old.employment_status = 'pending' then 'activate'
+    when new.role is distinct from old.role or new.role_id is distinct from old.role_id then 'permission'
+    when new.department_id is distinct from old.department_id
+      or new.position_id is distinct from old.position_id then 'transfer'
+    when new.status is distinct from old.status and new.status = 'disabled' then 'disable'
+    when new.status is distinct from old.status and new.status = 'active' then 'enable'
+    else 'transfer'
+  end;
+
+  insert into public.employee_events (profile_id, event_type, summary, detail, actor_id)
+  values (
+    new.id, etype, array_to_string(parts, '；'),
+    jsonb_build_object(
+      'role',        jsonb_build_array(old.role, new.role),
+      'status',      jsonb_build_array(old.status, new.status),
+      'employment',  jsonb_build_array(old.employment_status, new.employment_status),
+      'department',  jsonb_build_array(old.department_id, new.department_id),
+      'position',    jsonb_build_array(old.position_id, new.position_id),
+      'role_id',     jsonb_build_array(old.role_id, new.role_id)
+    ),
+    auth.uid()
+  );
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_log_profile_change on public.profiles;
+create trigger trg_log_profile_change
+  after insert or update on public.profiles
+  for each row execute function public.log_profile_change();
+
+-- ---------- 资源移交：把一个人名下的记录整体转给另一个人 ----------
+-- 离职交接会调用它；也可以单独用（调岗、分工调整、休假代管）
+create or replace function public.transfer_member_resources(p_from uuid, p_to uuid)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  n     int;
+  tbl   text;
+  moved jsonb := '{}'::jsonb;
+  to_name text;
+  tabs  text[] := array[
+    'stores','products','orders','inventory','campaigns','creators','tasks','expenses',
+    'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items'
+  ];
+begin
+  if not public.is_staff() then
+    raise exception '只有管理员可以移交资源';
+  end if;
+  if p_from is null or p_to is null then
+    raise exception '移交双方都必须指定';
+  end if;
+  if p_from = p_to then
+    raise exception '移交双方不能是同一个人';
+  end if;
+  if not exists (select 1 from public.profiles where id = p_from) then
+    raise exception '原负责人不存在';
+  end if;
+  if not exists (select 1 from public.profiles where id = p_to and status = 'active') then
+    raise exception '接手人不存在或账号已停用';
+  end if;
+
+  foreach tbl in array tabs loop
+    begin
+      execute format('update public.%I set user_id = $1 where user_id = $2', tbl)
+        using p_to, p_from;
+      get diagnostics n = row_count;
+      if n > 0 then
+        moved := moved || jsonb_build_object(tbl, n);
+      end if;
+    exception when undefined_table or undefined_column then
+      null;   -- 旧库还没建这张表，跳过
+    end;
+  end loop;
+
+  select coalesce(full_name, email, '接手人') into to_name from public.profiles where id = p_to;
+  insert into public.employee_events (profile_id, event_type, summary, detail, actor_id)
+  values (
+    p_from, 'transfer',
+    '名下资源移交给 ' || to_name,
+    jsonb_build_object('moved', moved, 'to', p_to),
+    auth.uid()
+  );
+
+  return moved;
+end;
+$$;
+
+-- ---------- 离职交接：转移资源 + 回收权限，一次事务内完成 ----------
+-- 前端分步调用会出现「资源转走了但权限没回收」的中间态，所以收进数据库函数。
+-- security definer：跨 13 张表批量改 user_id，普通 authenticated 做不到。
+create or replace function public.offboard_member(
+  p_target   uuid,
+  p_handover uuid default null,
+  p_reason   text default null
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  t     record;
+  moved jsonb := '{}'::jsonb;
+begin
+  if not public.is_staff() then
+    raise exception '只有管理员可以办理离职交接';
+  end if;
+  if p_target = auth.uid() then
+    raise exception '不能给自己办理离职';
+  end if;
+
+  select * into t from public.profiles where id = p_target;
+  if not found then
+    raise exception '成员不存在';
+  end if;
+  if t.role = 'super_admin' then
+    raise exception '超级管理员不能直接办理离职，请先把超管权限交给其他账号';
+  end if;
+  if t.role = 'admin' and not public.is_super_admin() then
+    raise exception '只有超级管理员可以办理管理员的离职';
+  end if;
+  if p_handover = p_target then
+    raise exception '交接人不能是离职人自己';
+  end if;
+
+  -- 资源交接：把离职人名下的记录整体转给接手人；
+  -- 不指定接手人时保留原归属（作为团队公共数据），不会丢失
+  if p_handover is not null then
+    moved := public.transfer_member_resources(p_target, p_handover);
+  end if;
+
+  -- 回收权限：清空部门 / 岗位 / 岗位角色，系统角色降为普通人员，账号停用
+  update public.profiles
+     set status            = 'disabled',
+         employment_status = 'left',
+         left_at           = now(),
+         left_reason       = nullif(btrim(coalesce(p_reason, '')), ''),
+         handover_to       = p_handover,
+         department_id     = null,
+         position_id       = null,
+         role_id           = null,
+         role              = 'member'
+   where id = p_target;
+
+  return jsonb_build_object('handover_to', p_handover, 'moved', moved);
+end;
+$$;
+
+-- ---------- 权限申请审批：通过即生效，驳回只留痕 ----------
+create or replace function public.decide_access_request(
+  p_id       uuid,
+  p_approve  boolean,
+  p_note     text default null
+)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  r      record;
+  target record;
+begin
+  if not public.has_permission('account.manage') then
+    raise exception '只有管理员可以审批权限申请';
+  end if;
+
+  select * into r from public.access_requests where id = p_id for update;
+  if not found then
+    raise exception '申请不存在';
+  end if;
+  if r.status <> 'pending' then
+    raise exception '该申请已经处理过了';
+  end if;
+  if r.user_id = auth.uid() then
+    raise exception '不能审批自己的申请';
+  end if;
+
+  select * into target from public.profiles where id = r.user_id;
+  if not found then
+    raise exception '申请人档案不存在';
+  end if;
+  if target.role = 'super_admin' then
+    raise exception '超级管理员的权限不能通过申请流程变更';
+  end if;
+
+  if p_approve then
+    if r.target_role is not null then
+      if r.target_role = 'admin' and not public.is_super_admin() then
+        raise exception '只有超级管理员可以授予管理员';
+      end if;
+      update public.profiles set role = r.target_role where id = r.user_id;
+    end if;
+    if r.target_role_id is not null then
+      if not exists (select 1 from public.roles where id = r.target_role_id) then
+        raise exception '申请的角色已被删除';
+      end if;
+      update public.profiles set role_id = r.target_role_id where id = r.user_id;
+    end if;
+  end if;
+
+  update public.access_requests
+     set status        = case when p_approve then 'approved' else 'rejected' end,
+         decided_by    = auth.uid(),
+         decided_at    = now(),
+         decision_note = nullif(btrim(coalesce(p_note, '')), '')
+   where id = p_id;
+end;
+$$;
+
 -- ---------- 角色变更守卫：防止普通成员给自己提权 ----------
 create or replace function public.guard_profile_changes()
 returns trigger
@@ -750,6 +1106,18 @@ begin
     end if;
   end if;
 
+  -- 人事字段同理：入职日期、离职时间、交接人都属于管理员维护的范围
+  if new.employment_status is distinct from old.employment_status
+     or new.hire_date      is distinct from old.hire_date
+     or new.left_at        is distinct from old.left_at
+     or new.left_reason    is distinct from old.left_reason
+     or new.handover_to    is distinct from old.handover_to
+     or new.provisioned_by is distinct from old.provisioned_by then
+    if not public.is_staff() then
+      raise exception '无权修改人事状态或入职离职信息，请联系管理员';
+    end if;
+  end if;
+
   return new;
 end;
 $$;
@@ -776,8 +1144,15 @@ grant select, insert, update, delete on
   public.inventory, public.campaigns, public.creators, public.tasks, public.expenses,
   public.competitors, public.competitor_snapshots,
   public.suppliers, public.purchase_orders, public.purchase_items,
-  public.departments, public.positions, public.roles
+  public.departments, public.positions, public.roles,
+  public.access_requests, public.employee_events
   to authenticated;
+
+-- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
+grant execute on function public.offboard_member(uuid, uuid, text) to authenticated;
+grant execute on function public.transfer_member_resources(uuid, uuid) to authenticated;
+grant execute on function public.decide_access_request(uuid, boolean, text) to authenticated;
+grant execute on function public.has_permission(text) to authenticated;
 
 -- -------------------------------------------------------------
 -- 默认组织数据（仅当表为空时写入，不会覆盖你已有的配置）
