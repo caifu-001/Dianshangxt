@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Pencil, Trash2, TrendingUp, UserPlus, Users, Video } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Pencil, Receipt, Trash2, TrendingUp, UserPlus, Users, Video } from 'lucide-react'
 import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
 import { CREATOR_STATUS } from '../lib/constants'
 import type { Creator, Store } from '../lib/types'
@@ -195,9 +196,14 @@ export default function Creators() {
         title="达人合作"
         description="TikTok 达人从建联到带货的全流程台账"
         actions={
-          <Button variant="primary" icon={<UserPlus className="w-3.5 h-3.5" />} onClick={openCreate}>
-            添加达人
-          </Button>
+          <>
+            <Link to="/expenses?source=creator" className="btn btn-sm btn-default">
+              <Receipt className="w-3.5 h-3.5" /> 达人费用归集
+            </Link>
+            <Button variant="primary" icon={<UserPlus className="w-3.5 h-3.5" />} onClick={openCreate}>
+              添加达人
+            </Button>
+          </>
         }
       />
 
@@ -342,6 +348,9 @@ export default function Creators() {
                           <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEdit(c)}>
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
+                          <Link to={`/expenses?source=creator&source_id=${c.id}`} className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50" title="记一笔费用并归集到该达人">
+                            <Receipt className="w-3.5 h-3.5" />
+                          </Link>
                           <button data-perm="delete" className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => setDeleting(c)}>
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>

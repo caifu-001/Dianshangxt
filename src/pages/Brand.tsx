@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   Activity,
   ExternalLink,
@@ -8,6 +9,7 @@ import {
   Megaphone,
   Pencil,
   Plus,
+  Receipt,
   Trash2,
   TrendingUp,
   Users,
@@ -459,11 +461,16 @@ export default function Brand() {
         title="站外品牌营销"
         description="社媒账号、站外红人、公共关系与曝光搜索量统一看板，让品牌在公司外部被更多人看到"
         actions={
-          canEdit ? (
-            <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate}>
-              新增{cfg.label}
-            </Button>
-          ) : undefined
+          <>
+            <Link to="/expenses?source=brand" className="btn btn-sm btn-default">
+              <Receipt className="w-3.5 h-3.5" /> 品牌费用归集
+            </Link>
+            {canEdit && (
+              <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate}>
+                新增{cfg.label}
+              </Button>
+            )}
+          </>
         }
       />
 
@@ -608,6 +615,11 @@ export default function Brand() {
                             >
                               <Pencil className="w-3.5 h-3.5" />
                             </button>
+                            {kind === 'influencer' && (
+                              <Link to={`/expenses?source=brand&source_id=${r.id}`} className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50" title="记一笔费用并归集到该红人">
+                                <Receipt className="w-3.5 h-3.5" />
+                              </Link>
+                            )}
                             <button
                               className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
                               title="删除"

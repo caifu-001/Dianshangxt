@@ -977,12 +977,25 @@ create table if not exists public.finance_expenses (
   payment_method text,
   voucher_no    text,
   note          text,
+  -- 业务来源：费用单可由广告投放/达人合作/站外品牌营销直接归集而来
+  source_module text not null default 'manual',  -- manual / ads / creator / brand
+  source_id     uuid,                             -- 关联 campaigns/creators/brand_* 记录
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
 create index if not exists idx_finance_expenses_date on public.finance_expenses(expense_date desc);
 create index if not exists idx_finance_expenses_cat on public.finance_expenses(category, expense_date desc);
 create index if not exists idx_finance_expenses_status on public.finance_expenses(status);
+create index if not exists idx_finance_expenses_source on public.finance_expenses(source_module, source_id);
+
+-- 旧库补列（幂等）
+alter table public.finance_expenses add column if not exists source_module text not null default 'manual';
+alter table public.finance_expenses add column if not exists source_id uuid;
+do $$ begin
+  alter table public.finance_expenses drop constraint if exists finance_expenses_source_module_chk;
+  alter table public.finance_expenses add constraint finance_expenses_source_module_chk
+    check (source_module in ('manual','ads','creator','brand'));
+end $$;
 
 -- 明细：差旅按交通/住宿/餐补逐条，工资按基本工资/社保/公积金逐条
 create table if not exists public.finance_expense_items (
@@ -1057,6 +1070,62 @@ drop trigger if exists trg_finance_expense_item_total on public.finance_expense_
 create trigger trg_finance_expense_item_total
 after insert or update or delete on public.finance_expense_items
 for each row execute function public.sync_finance_expense_total();
+
+-- -------------------------------------------------------------
+--  营销费用来源汇总：把广告投放 / 达人合作 / 站外品牌营销的
+--  「业务发生额」与在费用管理里「已归集的费用」放在一起对照，
+--  让三块营销投入与财务台账数据互通。
+--  业务金额保留原始口径（广告多为外币、红人报价为 CNY），
+--  已归集金额取费用单 amount（以费用单币种为准），前端标注币种。
+-- -------------------------------------------------------------
+create or replace function public.marketing_spend_summary()
+returns table (
+  source_module   text,
+  source_label    text,
+  business_amount numeric,   -- 业务侧发生额（原币口径合计）
+  recorded_amount numeric,   -- 费用管理已归集金额（费用单口径）
+  record_count    bigint,    -- 业务记录条数
+  expense_count   bigint     -- 已归集费用单数
+)
+language sql stable security definer set search_path = public
+as $$
+  with ads as (
+    select coalesce(sum(spend), 0) as amt, count(*)::bigint as cnt from public.campaigns
+  ),
+  creators as (
+    -- 达人合作：佣金按 GMV × 佣金率估算；无 GMV 时按 0
+    select coalesce(sum(gmv * commission_rate / 100.0), 0) as amt, count(*)::bigint as cnt
+      from public.creators
+  ),
+  brand as (
+    select coalesce(sum(price_cny), 0) as amt, count(*)::bigint as cnt
+      from public.brand_influencers
+  ),
+  recorded as (
+    select source_module,
+           coalesce(sum(amount), 0) as amt,
+           count(*)::bigint as cnt
+      from public.finance_expenses
+     where source_module in ('ads', 'creator', 'brand')
+     group by source_module
+  )
+  select v.mod, v.label, v.biz_amt, coalesce(r.amt, 0), v.biz_cnt, coalesce(r.cnt, 0)
+    from (
+      select 'ads'::text as mod, '广告投放'::text as label,
+             (select amt from ads) as biz_amt, (select cnt from ads) as biz_cnt
+      union all
+      select 'creator'::text, '达人合作'::text,
+             (select amt from creators), (select cnt from creators)
+      union all
+      select 'brand'::text, '站外品牌营销'::text,
+             (select amt from brand), (select cnt from brand)
+    ) v
+    left join recorded r on r.source_module = v.mod
+   where public.is_active_user()
+   order by v.mod;
+$$;
+
+grant execute on function public.marketing_spend_summary() to authenticated;
 
 -- =============================================================
 --  行级安全（RLS）与角色权限

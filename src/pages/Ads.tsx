@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
-import { Activity, Megaphone, Pause, Pencil, Play, Plus, Target, Trash2 } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import { Activity, Megaphone, Pause, Pencil, Play, Plus, Receipt, Target, Trash2 } from 'lucide-react'
 import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
 import { AD_TYPES, CAMPAIGN_STATUS } from '../lib/constants'
 import type { Campaign, Store } from '../lib/types'
@@ -233,9 +234,14 @@ export default function Ads() {
         title="广告投放"
         description="ACOS、ROAS、点击转化率一屏掌握，超目标的活动一眼看穿"
         actions={
-          <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate} disabled={!data?.stores.length}>
-            新建广告活动
-          </Button>
+          <>
+            <Link to="/expenses?source=ads" className="btn btn-sm btn-default">
+              <Receipt className="w-3.5 h-3.5" /> 广告费用归集
+            </Link>
+            <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate} disabled={!data?.stores.length}>
+              新建广告活动
+            </Button>
+          </>
         }
       />
 
@@ -390,6 +396,9 @@ export default function Ads() {
                           <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEdit(c)}>
                             <Pencil className="w-3.5 h-3.5" />
                           </button>
+                          <Link to={`/expenses?source=ads&source_id=${c.id}`} className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50" title="记一笔费用并归集到该活动">
+                            <Receipt className="w-3.5 h-3.5" />
+                          </Link>
                           <button data-perm="delete" className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => setDeleting(c)}>
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>

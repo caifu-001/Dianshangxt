@@ -1,11 +1,14 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   BarChart3,
   CheckCircle2,
   CircleDollarSign,
   ClipboardList,
   Coins,
+  ExternalLink,
   FileText,
+  Link2,
   Pencil,
   Plus,
   Receipt,
@@ -23,22 +26,29 @@ import { cn, downloadTextFile, fmtDate, money, num, pct, toCsv, today } from '..
 import {
   EXPENSE_APPROVAL_ACTION_META,
   EXPENSE_CATEGORY_META,
+  EXPENSE_SOURCE_META,
   EXPENSE_STATUS_META,
   EXPENSE_SUB_ITEMS,
   PAY_METHODS,
   approveExpense,
+  marketingSpendSummary,
   payExpense,
   submitExpense,
 } from '../lib/flow'
 import type {
+  BrandInfluencer,
+  Campaign,
+  Creator,
   Department,
   DevProject,
   ExpenseCategory,
+  ExpenseSourceModule,
   ExpenseStatus,
   FinanceBudget,
   FinanceExpense,
   FinanceExpenseApproval,
   FinanceExpenseItem,
+  MarketingSpendSummary,
   Store,
 } from '../lib/types'
 import {
@@ -87,6 +97,8 @@ interface ExpenseForm {
   title: string
   category: ExpenseCategory
   subcategory: string
+  source_module: ExpenseSourceModule
+  source_id: string
   owner_id: string
   department_id: string
   store_id: string
@@ -112,6 +124,8 @@ const emptyForm = (): ExpenseForm => ({
   title: '',
   category: 'other',
   subcategory: '',
+  source_module: 'manual',
+  source_id: '',
   owner_id: '',
   department_id: '',
   store_id: '',
@@ -146,11 +160,13 @@ export default function Expenses() {
   const { user, can } = useAuth()
   const canEdit = can('expense.edit')
   const canAudit = can('finance.audit')
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [view, setView] = useState<View>('records')
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [catFilter, setCatFilter] = useState('')
+  const [sourceFilter, setSourceFilter] = useState('')
   const [monthFilter, setMonthFilter] = useState('')
   const [page, setPage] = useState(1)
   const [form, setForm] = useState<ExpenseForm | null>(null)
@@ -163,7 +179,7 @@ export default function Expenses() {
   const [payDraft, setPayDraft] = useState({ paid_at: today(), method: 'bank', voucher: '', note: '' })
 
   const load = async () => {
-    const [expenses, items, budgets, approvals, directory, departments, stores, projects] = await Promise.all([
+    const [expenses, items, budgets, approvals, directory, departments, stores, projects, campaigns, creators, brandInfluencers, spendSummary] = await Promise.all([
       fetchRows<FinanceExpense>('finance_expenses', { order: { column: 'expense_date', ascending: false } }),
       fetchRows<FinanceExpenseItem>('finance_expense_items', { order: { column: 'created_at', ascending: true } }),
       fetchRows<FinanceBudget>('finance_budgets', { order: { column: 'period', ascending: false } }),
@@ -172,16 +188,56 @@ export default function Expenses() {
       fetchRows<Department>('departments'),
       fetchRows<Store>('stores'),
       fetchRows<DevProject>('dev_projects').catch(() => [] as DevProject[]),
+      fetchRows<Campaign>('campaigns').catch(() => [] as Campaign[]),
+      fetchRows<Creator>('creators').catch(() => [] as Creator[]),
+      fetchRows<BrandInfluencer>('brand_influencers').catch(() => [] as BrandInfluencer[]),
+      marketingSpendSummary().catch(() => [] as MarketingSpendSummary[]),
     ])
-    return { expenses, items, budgets, approvals, directory, departments, stores, projects }
+    return { expenses, items, budgets, approvals, directory, departments, stores, projects, campaigns, creators, brandInfluencers, spendSummary }
   }
 
   const { data, loading, error, reload } = useAsync(load, [])
+
+  // 业务页「记一笔费用」跳转过来时，数据加载完成后自动打开预填表单
+  const sourceIntent = searchParams.get('source')
+  useEffect(() => {
+    if (loading || !sourceIntent || form) return
+    openCreateFromSource(sourceIntent, searchParams.get('source_id') ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, sourceIntent, data])
 
   const memberMap = useMemo(() => new Map((data?.directory ?? []).map((m) => [m.id, m])), [data])
   const deptMap = useMemo(() => new Map((data?.departments ?? []).map((d) => [d.id, d])), [data])
   const storeMap = useMemo(() => new Map((data?.stores ?? []).map((s) => [s.id, s])), [data])
   const projectMap = useMemo(() => new Map((data?.projects ?? []).map((p) => [p.id, p])), [data])
+
+  // 业务来源候选记录：按模块给出名称 / 金额 / 币种，供记账时一键带入
+  interface SourceOption { id: string; label: string; amount: number; currency: string }
+  const sourceOptions = useMemo((): Record<Exclude<ExpenseSourceModule, 'manual'>, SourceOption[]> => {
+    const ads = (data?.campaigns ?? []).map((c) => ({
+      id: c.id,
+      label: `${c.name} · ${storeMap.get(c.store_id)?.name ?? c.platform} · 花费 ${num(c.spend, 2)} ${storeMap.get(c.store_id)?.currency ?? ''}`,
+      amount: Number(c.spend), currency: storeMap.get(c.store_id)?.currency ?? 'USD',
+    }))
+    const creator = (data?.creators ?? []).map((c) => ({
+      id: c.id,
+      label: `${c.name || c.handle} · 佣金 ${num(c.commission_rate, 1)}% · GMV ${num(c.gmv, 0)}`,
+      amount: Number(c.gmv) * Number(c.commission_rate) / 100, currency: 'USD',
+    }))
+    const brand = (data?.brandInfluencers ?? []).map((b) => ({
+      id: b.id,
+      label: `${b.name} · ${b.platform} · 报价 ${num(b.price_cny, 0)} CNY`,
+      amount: Number(b.price_cny), currency: 'CNY',
+    }))
+    return { ads, creator, brand }
+  }, [data, storeMap])
+
+  const sourceLabel = (e: FinanceExpense) => {
+    const mod = e.source_module || 'manual'
+    if (mod === 'manual' || !e.source_id) return null
+    const opt = sourceOptions[mod as keyof typeof sourceOptions]?.find((o) => o.id === e.source_id)
+    return `${EXPENSE_SOURCE_META[mod]?.short ?? mod}${opt ? ` · ${opt.label.split(' · ')[0]}` : ''}`
+  }
   const itemsByExpense = useMemo(() => {
     const map = new Map<string, FinanceExpenseItem[]>()
     for (const it of data?.items ?? []) {
@@ -229,6 +285,7 @@ export default function Expenses() {
     return (data?.expenses ?? []).filter((e) => {
       if (statusFilter && e.status !== statusFilter) return false
       if (catFilter && e.category !== catFilter) return false
+      if (sourceFilter && (e.source_module || 'manual') !== sourceFilter) return false
       if (monthFilter && dayjs(e.expense_date).format('YYYY-MM') !== monthFilter) return false
       if (!q) return true
       return (
@@ -238,7 +295,7 @@ export default function Expenses() {
         memberName(e.owner_id).toLowerCase().includes(q)
       )
     })
-  }, [data, search, statusFilter, catFilter, monthFilter, memberMap])
+  }, [data, search, statusFilter, catFilter, sourceFilter, monthFilter, memberMap])
 
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
@@ -259,8 +316,38 @@ export default function Expenses() {
     return `${prefix}${String(seq).padStart(4, '0')}`
   }
 
+  /** 从业务来源记录带入费用信息 */
+  function applySource(base: ExpenseForm, module: ExpenseSourceModule, sourceId: string): ExpenseForm {
+    // 未选具体记录时只切换模块，保持已填内容不变
+    if (module === 'manual') return { ...base, source_module: 'manual', source_id: '' }
+    if (!sourceId) return { ...base, source_module: module, source_id: '' }
+    const opt = (sourceOptions[module as keyof typeof sourceOptions] ?? []).find((o) => o.id === sourceId)
+    const cat: ExpenseCategory = 'marketing'
+    const sub = module === 'ads' ? '广告投放' : module === 'creator' ? '达人佣金' : '站外红人'
+    const name = opt?.label.split(' · ')[0] ?? '业务费用'
+    return {
+      ...base,
+      source_module: module,
+      source_id: sourceId,
+      category: cat,
+      subcategory: sub,
+      title: `${EXPENSE_SOURCE_META[module]?.label ?? '营销'} · ${name}`,
+      currency: opt?.currency ?? base.currency,
+      items: [{ ...newItem(cat), item: sub, qty: '1', unit_price: String(opt?.amount ?? 0) }],
+    }
+  }
+
   function openCreate() {
     setForm({ ...emptyForm(), code: genCode() })
+  }
+
+  /** 从业务页跳转：?source=ads|creator|brand&source_id=xxx 预填来源 */
+  function openCreateFromSource(module: string, sourceId: string) {
+    const mod = (module in EXPENSE_SOURCE_META ? module : 'manual') as ExpenseSourceModule
+    const base = { ...emptyForm(), code: genCode(), category: 'marketing' as ExpenseCategory }
+    setForm(applySource(base, mod, sourceId))
+    // 清掉 URL 参数，避免刷新重复触发
+    setSearchParams({}, { replace: true })
   }
 
   function openEdit(e: FinanceExpense) {
@@ -271,6 +358,8 @@ export default function Expenses() {
       title: e.title,
       category: e.category,
       subcategory: e.subcategory ?? '',
+      source_module: e.source_module || 'manual',
+      source_id: e.source_id ?? '',
       owner_id: e.owner_id ?? '',
       department_id: e.department_id ?? '',
       store_id: e.store_id ?? '',
@@ -311,6 +400,8 @@ export default function Expenses() {
         title: form.title.trim(),
         category: form.category,
         subcategory: form.subcategory ? form.subcategory.trim() : null,
+        source_module: form.source_module,
+        source_id: form.source_module === 'manual' ? null : (form.source_id || null),
         owner_id: form.owner_id || null,
         department_id: form.department_id || null,
         store_id: form.store_id || null,
@@ -561,6 +652,8 @@ export default function Expenses() {
               options={STATUS_ORDER.map((s) => ({ value: s, label: EXPENSE_STATUS_META[s].label }))} className="w-36" />
             <Select value={catFilter} onChange={(v) => { setCatFilter(v); setPage(1) }} placeholder="全部类别"
               options={CATEGORIES.map((c) => ({ value: c, label: EXPENSE_CATEGORY_META[c].label }))} className="w-32" />
+            <Select value={sourceFilter} onChange={(v) => { setSourceFilter(v); setPage(1) }} placeholder="全部来源"
+              options={Object.entries(EXPENSE_SOURCE_META).map(([value, m]) => ({ value, label: m.label }))} className="w-32" />
             <input type="month" className="input w-36" value={monthFilter} onChange={(e) => { setMonthFilter(e.target.value); setPage(1) }} />
           </div>
           {paged.length === 0 ? (
@@ -592,7 +685,12 @@ export default function Expenses() {
                         </td>
                         <td className="px-4 py-2.5">
                           <p className="font-medium text-ink-800 max-w-[240px] truncate">{e.title}</p>
-                          {e.note && <p className="text-[11px] text-ink-400 max-w-[240px] truncate">{e.note}</p>}
+                          {sourceLabel(e) && (
+                            <span className={cn('inline-flex px-1.5 py-0.5 rounded text-[10px] font-medium mt-0.5', EXPENSE_SOURCE_META[e.source_module]?.tone)}>
+                              <Link2 className="w-2.5 h-2.5 mr-0.5" />{sourceLabel(e)}
+                            </span>
+                          )}
+                          {!sourceLabel(e) && e.note && <p className="text-[11px] text-ink-400 max-w-[240px] truncate">{e.note}</p>}
                         </td>
                         <td className="px-4 py-2.5">
                           <span className={cn('inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium', cat.tone)}>{cat.label}</span>
@@ -752,6 +850,57 @@ export default function Expenses() {
         </div>
       ) : (
         <div className="space-y-3">
+          {/* 营销来源对照：广告 / 达人 / 站外品牌 的业务发生额 vs 费用归集额 */}
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Link2 className="w-4 h-4 text-brand-600" />
+              <h3 className="text-[13px] font-semibold text-ink-900">营销业务费用归集对照</h3>
+            </div>
+            <p className="text-[11px] text-ink-400 mb-3">广告投放、达人合作、站外品牌营销的发生额与已归集到费用管理的金额（各来源币种口径不同，仅作对照）</p>
+            {(data?.spendSummary ?? []).length === 0 ? (
+              <p className="text-[12px] text-ink-400 py-6 text-center">暂无营销业务数据</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12.5px]">
+                  <thead>
+                    <tr className="text-left text-[11px] text-ink-400 border-b border-ink-100 bg-ink-50/50">
+                      <th className="px-3 py-2 font-medium">来源</th>
+                      <th className="px-3 py-2 font-medium text-right">业务发生额（原币）</th>
+                      <th className="px-3 py-2 font-medium text-right">已归集费用</th>
+                      <th className="px-3 py-2 font-medium text-right">记录 / 单据</th>
+                      <th className="px-3 py-2 font-medium text-right">归集率</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(data?.spendSummary ?? []).map((s) => {
+                      const meta = EXPENSE_SOURCE_META[s.source_module] ?? EXPENSE_SOURCE_META.manual
+                      const rate = Number(s.business_amount) > 0
+                        ? Math.min(100, (Number(s.recorded_amount) / Number(s.business_amount)) * 100)
+                        : (Number(s.recorded_amount) > 0 ? 100 : 0)
+                      return (
+                        <tr key={s.source_module} className="border-b border-ink-100/70">
+                          <td className="px-3 py-2.5">
+                            <span className={cn('inline-flex px-1.5 py-0.5 rounded text-[11px] font-medium', meta.tone)}>{s.source_label}</span>
+                          </td>
+                          <td className="px-3 py-2.5 text-right num text-ink-700">{num(s.business_amount, 0)}</td>
+                          <td className="px-3 py-2.5 text-right num font-medium text-ink-900">{money(s.recorded_amount, 'CNY', 0)}</td>
+                          <td className="px-3 py-2.5 text-right num text-ink-500">{s.record_count} / {s.expense_count}</td>
+                          <td className="px-3 py-2.5 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <div className="w-16 h-1.5 rounded-full bg-ink-100 overflow-hidden">
+                                <div className="h-full rounded-full bg-brand-500" style={{ width: `${rate}%` }} />
+                              </div>
+                              <span className="num text-[11px] text-ink-600 w-10 text-right">{rate.toFixed(0)}%</span>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
             <div className="card p-4">
               <div className="flex items-center gap-2 mb-3">
@@ -833,6 +982,34 @@ export default function Expenses() {
         }>
         {form && (
           <div className="space-y-4">
+            {/* 业务来源：从广告/达人/品牌营销归集，一键带入金额 */}
+            <div className="rounded-lg border border-brand-100 bg-brand-50/30 p-3 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <Link2 className="w-4 h-4 text-brand-600" />
+                <span className="text-[12px] font-semibold text-ink-800">费用来源</span>
+                <span className="text-[11px] text-ink-400">从营销业务归集，自动带入金额与科目</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="来源模块">
+                  <Select value={form.source_module} onChange={(v) => {
+                    const mod = v as ExpenseSourceModule
+                    setForm(applySource({ ...form, source_id: '' }, mod, ''))
+                  }} options={Object.entries(EXPENSE_SOURCE_META).map(([value, m]) => ({ value, label: m.label }))} />
+                </Field>
+                {form.source_module !== 'manual' && (
+                  <Field label="关联业务记录">
+                    <Select value={form.source_id} onChange={(v) => setForm(applySource(form, form.source_module, v))} placeholder="选择具体记录（可选）"
+                      options={(sourceOptions[form.source_module as keyof typeof sourceOptions] ?? []).map((o) => ({ value: o.id, label: o.label }))} />
+                  </Field>
+                )}
+              </div>
+              {form.source_module !== 'manual' && form.source_id && (
+                <button type="button" className="inline-flex items-center gap-1 text-[11px] text-brand-600 hover:underline"
+                  onClick={() => window.open(`${EXPENSE_SOURCE_META[form.source_module]?.path}?edit=${form.source_id}`, '_blank')}>
+                  <ExternalLink className="w-3 h-3" /> 查看该业务记录
+                </button>
+              )}
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="单号"><input className="input" value={form.code} disabled /></Field>
               <Field label="费用事由" required><input className="input" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="如：11 月美国站广告充值" /></Field>

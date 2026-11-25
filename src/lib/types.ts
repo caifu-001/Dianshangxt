@@ -735,8 +735,24 @@ export interface FinanceExpense {
   payment_method: string | null
   voucher_no: string | null
   note: string | null
+  /** 业务来源：manual / ads（广告投放）/ creator（达人合作）/ brand（站外品牌营销） */
+  source_module: ExpenseSourceModule
+  source_id: string | null
   created_at: string
   updated_at: string
+}
+
+/** 费用来源模块 */
+export type ExpenseSourceModule = 'manual' | 'ads' | 'creator' | 'brand'
+
+/** 营销费用来源汇总（业务发生额 vs 费用归集额） */
+export interface MarketingSpendSummary {
+  source_module: ExpenseSourceModule
+  source_label: string
+  business_amount: number
+  recorded_amount: number
+  record_count: number
+  expense_count: number
 }
 
 /** 费用明细：差旅分项 / 工资社保分项 / 研发投入分项 */
