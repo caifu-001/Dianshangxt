@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Award,
   Building2,
@@ -277,6 +278,7 @@ export default function Suppliers() {
   const { user, can } = useAuth()
   const canEdit = can('purchase.edit')
   const fx = useFx()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [view, setView] = useState<'suppliers' | 'products' | 'analysis'>('suppliers')
   const [query, setQuery] = useState('')
@@ -315,6 +317,23 @@ export default function Suppliers() {
     ])
     return { suppliers, products, supplierProducts, contacts, pos, items, directory }
   }, [])
+
+  // 从采购页「完善档案」跳转过来时，数据就绪后直接打开对应供应商档案
+  const openedFromQuery = useRef<string | null>(null)
+  useEffect(() => {
+    const id = searchParams.get('edit')
+    if (!id || !data || openedFromQuery.current === id) return
+    const target = data.suppliers.find((s) => s.id === id)
+    if (!target) return
+    openedFromQuery.current = id
+    setView('suppliers')
+    // 只读岗位跳过来时打开详情，不给他们展示保存不了的编辑弹窗
+    if (canEdit) openEdit(target)
+    else setDetail(target)
+    setSearchParams({}, { replace: true })
+    // openEdit 每次渲染都会重建，这里只需在参数或数据变化时触发一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, data, canEdit])
 
   const supplierMap = useMemo(
     () => new Map((data?.suppliers ?? []).map((s) => [s.id, s])),

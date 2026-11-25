@@ -184,12 +184,10 @@ export default function Procurement() {
   const [paying, setPaying] = useState(false)
 
   const [supOpen, setSupOpen] = useState(false)
-  const [editingSup, setEditingSup] = useState<Supplier | null>(null)
   const [supDraft, setSupDraft] = useState<SupplierDraft>(EMPTY_SUPPLIER)
   const [savingSup, setSavingSup] = useState(false)
 
   const [deletingPo, setDeletingPo] = useState<PurchaseOrder | null>(null)
-  const [deletingSup, setDeletingSup] = useState<Supplier | null>(null)
   const [confirmLoading, setConfirmLoading] = useState(false)
 
   const { data, loading, error, reload } = useAsync(async () => {
@@ -542,34 +540,16 @@ export default function Procurement() {
   /* ---------------- 供应商 ---------------- */
 
   function openCreateSupplier() {
-    setEditingSup(null)
     setSupDraft(EMPTY_SUPPLIER)
     setSupOpen(true)
   }
 
-  function openEditSupplier(sup: Supplier) {
-    setEditingSup(sup)
-    setSupDraft({
-      name: sup.name,
-      contact: sup.contact ?? '',
-      phone: sup.phone ?? '',
-      email: sup.email ?? '',
-      address: sup.address ?? '',
-      category: sup.category ?? '',
-      payment_terms: sup.payment_terms,
-      lead_time_days: String(sup.lead_time_days),
-      rating: String(sup.rating),
-      status: sup.status,
-      note: sup.note ?? '',
-    })
-    setSupOpen(true)
-  }
-
+  /** 采购页只做快速新建；完整档案统一到供应商库维护 */
   async function handleSaveSupplier() {
     if (!supDraft.name.trim()) return push('请填写供应商名称', 'error')
     setSavingSup(true)
     try {
-      const payload = {
+      await insertRow('suppliers', {
         name: supDraft.name.trim(),
         contact: supDraft.contact.trim() || null,
         phone: supDraft.phone.trim() || null,
@@ -581,16 +561,10 @@ export default function Procurement() {
         rating: Math.min(5, Math.max(1, Math.round(Number(supDraft.rating) || 3))),
         status: supDraft.status,
         note: supDraft.note.trim() || null,
-      }
-      if (editingSup) {
-        await updateRow('suppliers', editingSup.id, payload)
-        push('供应商已更新')
-      } else {
-        await insertRow('suppliers', payload)
-        push('供应商已创建')
-      }
+      })
       setSupOpen(false)
       reload()
+      push('已快速创建；点列表行的「完善档案」可补充多联系人、可供商品与资质')
     } catch (err) {
       const msg = err instanceof Error ? err.message : '保存失败'
       push(/duplicate|unique/i.test(msg) ? '已存在同名供应商' : msg, 'error')
@@ -609,21 +583,6 @@ export default function Procurement() {
       push('采购单已删除')
       if (detailPoId === deletingPo.id) setDetailPoId(null)
       setDeletingPo(null)
-      reload()
-    } catch (err) {
-      push(err instanceof Error ? err.message : '删除失败', 'error')
-    } finally {
-      setConfirmLoading(false)
-    }
-  }
-
-  async function handleDeleteSupplier() {
-    if (!deletingSup) return
-    setConfirmLoading(true)
-    try {
-      await deleteRow('suppliers', deletingSup.id)
-      push('供应商已删除，历史采购单会保留但不再关联')
-      setDeletingSup(null)
       reload()
     } catch (err) {
       push(err instanceof Error ? err.message : '删除失败', 'error')
@@ -738,7 +697,7 @@ export default function Procurement() {
             )}
             {tab === 'suppliers' && (
               <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreateSupplier}>
-                新增供应商
+                快速新增供应商
               </Button>
             )}
           </>
@@ -963,7 +922,7 @@ export default function Procurement() {
         <>
           <div className="flex items-center justify-between mb-3">
             <p className="text-[11.5px] text-ink-500">
-              这里是采购流程里的简版供应商列表；完整档案（联系方式 / 资质 / 可供产品报价 / 供货绩效）在供应商管理库
+              采购下单用的简版视图：这里只做快速查找与新建；多联系人、商品报价、资质与供货绩效统一在供应商管理库维护
             </p>
             <Link
               to="/suppliers"
@@ -1034,7 +993,7 @@ export default function Procurement() {
                 }
                 action={
                   <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreateSupplier}>
-                    新增供应商
+                    快速新增供应商
                   </Button>
                 }
               />
@@ -1094,18 +1053,13 @@ export default function Procurement() {
                             <Badge tone={meta?.tone ?? 'gray'}>{meta?.label ?? sup.status}</Badge>
                           </td>
                           <td className="td">
-                            <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                              <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEditSupplier(sup)}>
-                                <Pencil className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                data-perm="delete"
-                                className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
-                                onClick={() => setDeletingSup(sup)}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
+                            <Link
+                              to={`/suppliers?edit=${sup.id}`}
+                              title="到供应商库维护多联系人、可供商品、资质与绩效"
+                              className="inline-flex items-center gap-0.5 text-[11px] font-medium text-brand-600 hover:text-brand-700 whitespace-nowrap"
+                            >
+                              完善档案 <ArrowRight className="w-3 h-3" />
+                            </Link>
                           </td>
                         </tr>
                       )
@@ -1671,8 +1625,8 @@ export default function Procurement() {
       <Modal
         open={supOpen}
         onClose={() => setSupOpen(false)}
-        title={editingSup ? '编辑供应商' : '新增供应商'}
-        description="采购流程里的简版档案；多位联系人与多款商品请到「供应商管理库」维护"
+        title="快速新增供应商"
+        description="只填下单必需字段即可；多联系人、可供商品报价、资质与绩效请到「供应商管理库」维护"
         width="max-w-2xl"
         footer={
           <>
@@ -1741,14 +1695,6 @@ export default function Procurement() {
         message={`确定删除 ${deletingPo?.po_no ?? ''} 吗？该单的采购明细会一起删除，已同步到库存的数量不会回滚。`}
       />
 
-      <ConfirmDialog
-        open={!!deletingSup}
-        onClose={() => setDeletingSup(null)}
-        onConfirm={handleDeleteSupplier}
-        loading={confirmLoading}
-        title="删除供应商"
-        message={`确定删除「${deletingSup?.name ?? ''}」吗？历史采购单会保留，但不再关联这家供应商。`}
-      />
     </>
   )
 }
