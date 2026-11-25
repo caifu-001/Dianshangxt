@@ -1539,6 +1539,61 @@ as $$
    limit least(greatest(coalesce(p_limit, 100), 1), 500);
 $$;
 
+-- 日志占用统计：仅超管可见，供清理前判断规模
+create or replace function public.system_log_stats()
+returns table (total bigint, oldest timestamptz, newest timestamptz)
+language sql stable security definer set search_path = public
+as $$
+  select count(*), min(l.created_at), max(l.created_at)
+    from public.system_logs l
+   where public.is_super_admin();
+$$;
+
+-- 清理日志：仅超管可调。
+--   p_days > 0：删除该天数之前的日志；p_days <= 0：清空全部。
+--   p_confirm 必须为 'CLEAR' 才允许清空，避免误触发把审计轨迹全删了。
+-- 清理动作本身在删除后写一条 warning 日志（作为「曾做过清理」的痕迹）。
+create or replace function public.clean_system_logs(
+  p_days    integer default 90,
+  p_confirm text default null
+)
+returns integer
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_deleted integer;
+  v_mode    text;
+  v_cutoff  timestamptz;
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以清理系统日志';
+  end if;
+
+  v_mode := case when coalesce(p_days, 0) > 0 then 'by_age' else 'all' end;
+  if v_mode = 'all' and p_confirm is distinct from 'CLEAR' then
+    raise exception '清空全部日志需要显式确认';
+  end if;
+
+  if v_mode = 'by_age' then
+    v_cutoff := now() - make_interval(days => least(p_days, 3650));
+    delete from public.system_logs l where l.created_at < v_cutoff;
+  else
+    delete from public.system_logs;
+  end if;
+  get diagnostics v_deleted = row_count;
+
+  perform public.record_system_event(
+    'system', 'logs_cleaned',
+    case when v_mode = 'all'
+         then '清空系统日志，删除 ' || v_deleted || ' 条'
+         else '清理 ' || p_days || ' 天前的日志，删除 ' || v_deleted || ' 条' end,
+    jsonb_build_object('mode', v_mode, 'days', p_days, 'deleted', v_deleted),
+    'system_logs', null, 'warning');
+
+  return v_deleted;
+end;
+$$;
+
 -- 系统角色 / 状态 / 公司归属变化时自动留痕，前端改代码也绕不过
 create or replace function public.log_profile_security_event()
 returns trigger
@@ -3868,6 +3923,8 @@ grant execute on function public.log_system_event(text, text, text, jsonb, text,
 -- 初始授权撤销后，仅 security definer 的函数内部（以所有者身份）还能写入。
 revoke all on function public.record_system_event(text, text, text, jsonb, text, text, text) from public, anon, authenticated;
 grant execute on function public.list_system_logs(integer, text, text, text, uuid) to authenticated;
+grant execute on function public.system_log_stats() to authenticated;
+grant execute on function public.clean_system_logs(integer, text) to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
 grant execute on function public.offboard_member(uuid, uuid, text) to authenticated;

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import dayjs from 'dayjs'
-import { Activity, RefreshCw, ScrollText } from 'lucide-react'
+import { Activity, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
 import { useAsync, useDebounced } from '../hooks/useAsync'
 import { callRpc } from '../lib/db'
 import {
@@ -8,11 +8,13 @@ import {
   Button,
   EmptyState,
   ErrorBlock,
+  Field,
   LoadingBlock,
   Modal,
   PageHeader,
   SearchInput,
   Select,
+  useToast,
 } from '../components/ui'
 
 interface SystemLog {
@@ -59,6 +61,7 @@ const ACTION_LABELS: Record<string, string> = {
   client_error: '前端运行异常',
   api_error: '接口调用失败',
   permission_denied: '越权操作拦截',
+  logs_cleaned: '日志清理',
 }
 
 const CATEGORY_OPTIONS = [
@@ -83,16 +86,23 @@ function severityTone(severity: string): 'gray' | 'amber' | 'red' {
   return 'gray'
 }
 
-/** 平台超级管理员专属：全站审计日志，只读 */
+/** 平台超级管理员专属：全站审计日志，可按需清理 */
 interface CompanyOption { id: string; name: string }
+interface LogStats { total: string; oldest: string | null; newest: string | null }
 
 export default function SystemLogs() {
+  const { push } = useToast()
   const [category, setCategory] = useState('')
   const [severity, setSeverity] = useState('')
   const [company, setCompany] = useState('')
   const [query, setQuery] = useState('')
   const [limit, setLimit] = useState('100')
   const [detail, setDetail] = useState<SystemLog | null>(null)
+  const [cleanOpen, setCleanOpen] = useState(false)
+  const [cleanDays, setCleanDays] = useState('90')
+  const [cleanAll, setCleanAll] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
+  const [cleaning, setCleaning] = useState(false)
   const search = useDebounced(query, 350)
 
   const companies = useAsync<CompanyOption[]>(
@@ -103,6 +113,8 @@ export default function SystemLogs() {
     { value: '', label: '全部公司' },
     ...(companies.data ?? []).map((c) => ({ value: c.id, label: c.name })),
   ]
+
+  const stats = useAsync<LogStats[]>(() => callRpc<LogStats[]>('system_log_stats'), [])
 
   const { data, loading, error, reload } = useAsync<SystemLog[]>(
     () =>
@@ -117,6 +129,33 @@ export default function SystemLogs() {
   )
 
   const rows = data ?? []
+  const stat = stats.data?.[0]
+  const total = stat ? Number(stat.total) : 0
+
+  async function handleClean() {
+    if (cleanAll && confirmText.trim() !== 'CLEAR') {
+      push('请输入 CLEAR 确认清空全部日志', 'error')
+      return
+    }
+    setCleaning(true)
+    try {
+      const days = cleanAll ? 0 : Math.max(1, Number(cleanDays) || 90)
+      const deleted = await callRpc<number>('clean_system_logs', {
+        p_days: days,
+        p_confirm: cleanAll ? 'CLEAR' : null,
+      })
+      push(`已清理 ${deleted} 条日志`)
+      setCleanOpen(false)
+      setCleanAll(false)
+      setConfirmText('')
+      reload()
+      stats.reload()
+    } catch (e) {
+      push(e instanceof Error ? e.message : '清理失败', 'error')
+    } finally {
+      setCleaning(false)
+    }
+  }
 
   return (
     <>
@@ -124,11 +163,30 @@ export default function SystemLogs() {
         title="系统日志"
         description="全平台所有公司的关键操作与异常记录，仅平台超级管理员可见，可用于排查故障"
         actions={
-          <Button size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />} onClick={reload}>
-            刷新
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" icon={<RefreshCw className="w-3.5 h-3.5" />} onClick={() => { reload(); stats.reload() }}>
+              刷新
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              icon={<Trash2 className="w-3.5 h-3.5" />}
+              onClick={() => setCleanOpen(true)}
+            >
+              清理日志
+            </Button>
+          </div>
         }
       />
+
+      {stat && total > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-5 gap-y-1 px-4 py-2.5 rounded-lg bg-ink-50 text-[11.5px] text-ink-500">
+          <span>日志总量 <b className="text-ink-700 tabular-nums">{total.toLocaleString()}</b> 条</span>
+          {stat.oldest && <span>最早 {dayjs(stat.oldest).format('YYYY-MM-DD HH:mm')}</span>}
+          {stat.newest && <span>最新 {dayjs(stat.newest).format('YYYY-MM-DD HH:mm')}</span>}
+          <span className="ml-auto text-ink-400">日志占用空间过大时，可按需清理历史记录</span>
+        </div>
+      )}
 
       <div className="card">
         <div className="flex flex-wrap items-center gap-2.5 px-4 py-3 border-b border-ink-100">
@@ -218,7 +276,7 @@ export default function SystemLogs() {
 
       <p className="mt-3 flex items-center gap-1.5 text-[11.5px] text-ink-400">
         <Activity className="w-3.5 h-3.5" />
-        登录、权限变更、公司操作及前端异常均自动留痕；日志只读，任何账号都无法修改或删除。
+        登录、权限变更、公司操作及前端异常均自动留痕；日志不可篡改，仅平台超管可按保留天数清理，清理动作本身也会留痕。
       </p>
 
       <Modal
@@ -271,6 +329,76 @@ export default function SystemLogs() {
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={cleanOpen}
+        onClose={() => { if (!cleaning) setCleanOpen(false) }}
+        title="清理系统日志"
+        description="仅平台超级管理员可操作，清理动作本身会记录一条日志"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button size="sm" onClick={() => setCleanOpen(false)} disabled={cleaning}>
+              取消
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              loading={cleaning}
+              onClick={handleClean}
+            >
+              确认清理
+            </Button>
+          </div>
+        }
+      >
+        <div className="space-y-4 text-[13px]">
+          {stat && (
+            <p className="px-3 py-2 rounded-lg bg-ink-50 text-ink-600">
+              当前共 <b className="tabular-nums">{total.toLocaleString()}</b> 条日志
+              {stat.oldest && <>，最早 {dayjs(stat.oldest).format('YYYY-MM-DD')}</>}。
+            </p>
+          )}
+          <Field
+            label="清理方式"
+            hint="建议按保留天数清理；清空全部会删除所有审计轨迹，操作不可恢复。"
+          >
+            <Select
+              value={cleanAll ? 'all' : 'by_age'}
+              onChange={(v) => { setCleanAll(v === 'all'); setConfirmText('') }}
+              options={[
+                { value: 'by_age', label: '按保留天数清理' },
+                { value: 'all', label: '清空全部日志' },
+              ]}
+            />
+          </Field>
+          {!cleanAll ? (
+            <Field label="保留最近" hint="删除该天数之前的所有日志，最近的日志会保留。">
+              <Select
+                value={cleanDays}
+                onChange={setCleanDays}
+                options={[
+                  { value: '30', label: '最近 30 天' },
+                  { value: '90', label: '最近 90 天' },
+                  { value: '180', label: '最近 180 天' },
+                  { value: '365', label: '最近 1 年' },
+                ]}
+              />
+            </Field>
+          ) : (
+            <Field label="二次确认" hint="此操作不可恢复，请输入 CLEAR（区分大小写）确认清空全部日志。">
+              <input
+                className="input"
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder="输入 CLEAR"
+              />
+            </Field>
+          )}
+          <div className="px-3 py-2.5 rounded-lg bg-amber-50 border border-amber-200 text-[12px] text-amber-800 leading-relaxed">
+            清理后历史故障将无法追溯，请确认已完成排查或已导出所需记录。清理记录本身会保留在新日志中。
+          </div>
+        </div>
       </Modal>
     </>
   )
