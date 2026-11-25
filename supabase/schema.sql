@@ -1129,62 +1129,6 @@ create trigger trg_finance_expense_item_total
 after insert or update or delete on public.finance_expense_items
 for each row execute function public.sync_finance_expense_total();
 
--- -------------------------------------------------------------
---  营销费用来源汇总：把广告投放 / 达人合作 / 站外品牌营销的
---  「业务发生额」与在费用管理里「已归集的费用」放在一起对照，
---  让三块营销投入与财务台账数据互通。
---  业务金额保留原始口径（广告多为外币、红人报价为 CNY），
---  已归集金额取费用单 amount（以费用单币种为准），前端标注币种。
--- -------------------------------------------------------------
-create or replace function public.marketing_spend_summary()
-returns table (
-  source_module   text,
-  source_label    text,
-  business_amount numeric,   -- 业务侧发生额（原币口径合计）
-  recorded_amount numeric,   -- 费用管理已归集金额（费用单口径）
-  record_count    bigint,    -- 业务记录条数
-  expense_count   bigint     -- 已归集费用单数
-)
-language sql stable security definer set search_path = public
-as $$
-  with ads as (
-    select coalesce(sum(spend), 0) as amt, count(*)::bigint as cnt from public.campaigns where public.in_company(company_id)
-  ),
-  creators as (
-    -- 达人合作：佣金按 GMV × 佣金率估算；无 GMV 时按 0
-    select coalesce(sum(gmv * commission_rate / 100.0), 0) as amt, count(*)::bigint as cnt
-      from public.creators where public.in_company(company_id)
-  ),
-  brand as (
-    select coalesce(sum(price_cny), 0) as amt, count(*)::bigint as cnt
-      from public.brand_influencers where public.in_company(company_id)
-  ),
-  recorded as (
-    select source_module,
-           coalesce(sum(amount), 0) as amt,
-           count(*)::bigint as cnt
-      from public.finance_expenses
-     where source_module in ('ads', 'creator', 'brand') and public.in_company(company_id)
-     group by source_module
-  )
-  select v.mod, v.label, v.biz_amt, coalesce(r.amt, 0), v.biz_cnt, coalesce(r.cnt, 0)
-    from (
-      select 'ads'::text as mod, '广告投放'::text as label,
-             (select amt from ads) as biz_amt, (select cnt from ads) as biz_cnt
-      union all
-      select 'creator'::text, '达人合作'::text,
-             (select amt from creators), (select cnt from creators)
-      union all
-      select 'brand'::text, '站外品牌营销'::text,
-             (select amt from brand), (select cnt from brand)
-    ) v
-    left join recorded r on r.source_module = v.mod
-   where public.is_active_user()
-   order by v.mod;
-$$;
-
-grant execute on function public.marketing_spend_summary() to authenticated;
-
 -- =============================================================
 --  行级安全（RLS）与角色权限（多租户版）
 --  · 业务数据与人员档案按 company_id 严格隔离；部门 / 岗位 / 角色为平台模板全局共享
@@ -1289,6 +1233,64 @@ as $$
     false
   );
 $$;
+
+-- -------------------------------------------------------------
+--  营销费用来源汇总：把广告投放 / 达人合作 / 站外品牌营销的
+--  「业务发生额」与在费用管理里「已归集的费用」放在一起对照，
+--  让三块营销投入与财务台账数据互通。
+--  业务金额保留原始口径（广告多为外币、红人报价为 CNY），
+--  已归集金额取费用单 amount（以费用单币种为准），前端标注币种。
+--  注意：这是 LANGUAGE sql 函数，创建时即解析函数体，必须放在
+--  company_id 补列（do 块）及 in_company / is_active_user 之后。
+-- -------------------------------------------------------------
+create or replace function public.marketing_spend_summary()
+returns table (
+  source_module   text,
+  source_label    text,
+  business_amount numeric,   -- 业务侧发生额（原币口径合计）
+  recorded_amount numeric,   -- 费用管理已归集金额（费用单口径）
+  record_count    bigint,    -- 业务记录条数
+  expense_count   bigint     -- 已归集费用单数
+)
+language sql stable security definer set search_path = public
+as $$
+  with ads as (
+    select coalesce(sum(spend), 0) as amt, count(*)::bigint as cnt from public.campaigns where public.in_company(company_id)
+  ),
+  creators as (
+    -- 达人合作：佣金按 GMV × 佣金率估算；无 GMV 时按 0
+    select coalesce(sum(gmv * commission_rate / 100.0), 0) as amt, count(*)::bigint as cnt
+      from public.creators where public.in_company(company_id)
+  ),
+  brand as (
+    select coalesce(sum(price_cny), 0) as amt, count(*)::bigint as cnt
+      from public.brand_influencers where public.in_company(company_id)
+  ),
+  recorded as (
+    select source_module,
+           coalesce(sum(amount), 0) as amt,
+           count(*)::bigint as cnt
+      from public.finance_expenses
+     where source_module in ('ads', 'creator', 'brand') and public.in_company(company_id)
+     group by source_module
+  )
+  select v.mod, v.label, v.biz_amt, coalesce(r.amt, 0), v.biz_cnt, coalesce(r.cnt, 0)
+    from (
+      select 'ads'::text as mod, '广告投放'::text as label,
+             (select amt from ads) as biz_amt, (select cnt from ads) as biz_cnt
+      union all
+      select 'creator'::text, '达人合作'::text,
+             (select amt from creators), (select cnt from creators)
+      union all
+      select 'brand'::text, '站外品牌营销'::text,
+             (select amt from brand), (select cnt from brand)
+    ) v
+    left join recorded r on r.source_module = v.mod
+   where public.is_active_user()
+   order by v.mod;
+$$;
+
+grant execute on function public.marketing_spend_summary() to authenticated;
 
 -- 通讯录：只暴露姓名 / 邮箱 / 部门 / 岗位 / 角色等公开字段，
 -- 不返回备注、设置、最近登录等敏感信息。
