@@ -43,7 +43,47 @@ alter table public.profiles add  constraint profiles_status_check
 create index if not exists idx_profiles_role   on public.profiles(role);
 create index if not exists idx_profiles_status on public.profiles(status);
 
--- 新用户注册后自动建档：库里第一个注册者自动成为超级管理员
+-- -------------------------------------------------------------
+-- 1b. 多租户：公司（租户）
+--   · 平台超级管理员不属于任何公司，通过 active_company_id 切换当前管理视角
+--   · 普通账号必须归属一家公司；公司内最高角色为 admin（普通管理员）
+--   · 默认公司承载升级前已有数据，保证老库重跑脚本后数据不丢
+-- -------------------------------------------------------------
+create table if not exists public.companies (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  code       text,
+  status     text not null default 'active' check (status in ('active','disabled')),
+  note       text,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists uq_companies_code
+  on public.companies(lower(code)) where code is not null;
+
+insert into public.companies (id, name, code, status)
+values ('00000000-0000-0000-0000-000000000001', '默认公司', 'DEFAULT', 'active')
+on conflict (id) do nothing;
+
+alter table public.profiles add column if not exists company_id        uuid references public.companies(id) on delete set null;
+alter table public.profiles add column if not exists active_company_id uuid references public.companies(id) on delete set null;
+create index if not exists idx_profiles_company on public.profiles(company_id);
+
+-- 旧数据归入默认公司（超管下面单独摘出）
+update public.profiles set company_id = '00000000-0000-0000-0000-000000000001'::uuid
+ where company_id is null;
+
+-- 平台唯一超级管理员：不属于任何公司；其余超管降级为公司普通管理员
+update public.profiles
+   set role = 'super_admin',
+       company_id = null,
+       active_company_id = coalesce(active_company_id, '00000000-0000-0000-0000-000000000001'::uuid)
+ where lower(coalesce(email, '')) = 'yinsunccess168@163.com';
+update public.profiles
+   set role = 'admin'
+ where role = 'super_admin'
+   and lower(coalesce(email, '')) <> 'yinsunccess168@163.com';
+
+-- 新用户注册后自动建档
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -54,16 +94,22 @@ declare
   existing_count int;
   assigned_role  text;
 begin
-  select count(*) into existing_count from public.profiles;
-  assigned_role := case when existing_count = 0 then 'super_admin' else 'member' end;
+  -- 多租户：只有平台超管邮箱能拿到 super_admin；其余账号一律普通人员，
+  -- 且默认落进默认公司，由所属公司的管理员在账号管理页调整。
+  assigned_role := case
+    when lower(coalesce(new.email, '')) = 'yinsunccess168@163.com' then 'super_admin'
+    else 'member'
+  end;
 
-  insert into public.profiles (id, email, full_name, role, status)
+  insert into public.profiles (id, email, full_name, role, status, company_id, active_company_id)
   values (
     new.id,
     new.email,
     coalesce(new.raw_user_meta_data->>'full_name', split_part(coalesce(new.email, ''), '@', 1)),
     assigned_role,
-    'active'
+    'active',
+    case when assigned_role = 'super_admin' then null else '00000000-0000-0000-0000-000000000001'::uuid end,
+    case when assigned_role = 'super_admin' then '00000000-0000-0000-0000-000000000001'::uuid else null end
   )
   on conflict (id) do nothing;
   return new;
@@ -83,9 +129,19 @@ security definer
 set search_path = public
 as $$
 begin
-  if not exists (select 1 from public.profiles where role = 'super_admin') then
-    update public.profiles set role = 'super_admin'
-    where id = (select id from public.profiles order by created_at asc limit 1);
+  -- 多租户后超管固定为指定邮箱；该邮箱未注册时不动现有超管，避免把系统锁死，
+  -- 但绝不再随机把「最早注册的账号」提升成超管。
+  if exists (select 1 from public.profiles where lower(coalesce(email, '')) = 'yinsunccess168@163.com') then
+    update public.profiles
+       set role = 'super_admin',
+           company_id = null,
+           active_company_id = coalesce(active_company_id, '00000000-0000-0000-0000-000000000001'::uuid)
+     where lower(coalesce(email, '')) = 'yinsunccess168@163.com';
+
+    update public.profiles
+       set role = 'admin'
+     where role = 'super_admin'
+       and lower(coalesce(email, '')) <> 'yinsunccess168@163.com';
   end if;
 end;
 $$;
@@ -1092,23 +1148,23 @@ returns table (
 language sql stable security definer set search_path = public
 as $$
   with ads as (
-    select coalesce(sum(spend), 0) as amt, count(*)::bigint as cnt from public.campaigns
+    select coalesce(sum(spend), 0) as amt, count(*)::bigint as cnt from public.campaigns where public.in_company(company_id)
   ),
   creators as (
     -- 达人合作：佣金按 GMV × 佣金率估算；无 GMV 时按 0
     select coalesce(sum(gmv * commission_rate / 100.0), 0) as amt, count(*)::bigint as cnt
-      from public.creators
+      from public.creators where public.in_company(company_id)
   ),
   brand as (
     select coalesce(sum(price_cny), 0) as amt, count(*)::bigint as cnt
-      from public.brand_influencers
+      from public.brand_influencers where public.in_company(company_id)
   ),
   recorded as (
     select source_module,
            coalesce(sum(amount), 0) as amt,
            count(*)::bigint as cnt
       from public.finance_expenses
-     where source_module in ('ads', 'creator', 'brand')
+     where source_module in ('ads', 'creator', 'brand') and public.in_company(company_id)
      group by source_module
   )
   select v.mod, v.label, v.biz_amt, coalesce(r.amt, 0), v.biz_cnt, coalesce(r.cnt, 0)
@@ -1130,13 +1186,92 @@ $$;
 grant execute on function public.marketing_spend_summary() to authenticated;
 
 -- =============================================================
---  行级安全（RLS）与角色权限
---  权限模型：团队共享同一份业务数据，按角色控制「可删 / 可管人」
---    super_admin  超级管理员：全部权限，可管理任何账号
---    admin        普通管理员：可删除业务数据，可管理普通人员
---    member       普通人员  ：可读写业务数据，不可删除、不可管人
+--  行级安全（RLS）与角色权限（多租户版）
+--  · 业务数据与人员档案按 company_id 严格隔离；部门 / 岗位 / 角色为平台模板全局共享
+--  · super_admin 平台超管：不属于任何公司，通过切换视角管理各公司
+--  · admin 公司普通管理员：仅本公司可删业务数据、可管人
+--  · member 普通人员：仅本公司可读写业务数据
 --  security definer 函数以表所有者身份执行，绕过 RLS，避免策略递归
 -- =============================================================
+
+-- 当前公司：普通账号=所属公司；平台超管=切换视角（未切换时看默认公司）
+create or replace function public.current_company_id()
+returns uuid
+language sql stable security definer set search_path = public
+as $$
+  select coalesce(
+    (select case
+       when p.role = 'super_admin'
+         then coalesce(p.active_company_id, '00000000-0000-0000-0000-000000000001'::uuid)
+       else p.company_id
+     end
+       from public.profiles p where p.id = auth.uid()),
+    '00000000-0000-0000-0000-000000000001'::uuid
+  );
+$$;
+
+-- 行归属判定：平台超管同样收敛到当前视角，避免误看 / 误写别家公司
+create or replace function public.in_company(row_company uuid)
+returns boolean
+language sql stable security definer set search_path = public
+as $$
+  select row_company is not distinct from public.current_company_id();
+$$;
+
+-- 关键 RPC 的租户校验：security definer 会绕过 RLS，必须显式确认目标行属于当前公司
+create or replace function public.assert_row_company(p_table text, p_id uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_ok boolean;
+begin
+  execute format('select public.in_company(company_id) from public.%I where id = $1', p_table)
+     into v_ok using p_id;
+  if not coalesce(v_ok, false) then
+    raise exception '记录不存在或不属于当前公司';
+  end if;
+end;
+$$;
+
+-- 写入时自动补公司归属，各业务页面无需改动
+create or replace function public.set_company_id()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if new.company_id is null then
+    new.company_id := public.current_company_id();
+  end if;
+  return new;
+end;
+$$;
+
+-- 所有业务表补列、回填默认公司、建索引并挂自动填充触发器
+do $do$
+declare
+  t text;
+  tabs text[] := array[
+    'stores','products','orders','inventory','campaigns','creators','tasks','expenses',
+    'competitors','competitor_snapshots','suppliers','supplier_products','supplier_contacts',
+    'purchase_orders','purchase_items','purchase_payments','purchase_approvals',
+    'access_requests','employee_events','performance_reviews',
+    'stock_movements','stock_transfers',
+    'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics',
+    'dev_projects','dev_milestones','dev_costs',
+    'finance_expenses','finance_expense_items','finance_budgets','finance_expense_approvals'
+  ];
+begin
+  foreach t in array tabs loop
+    execute format('alter table public.%I add column if not exists company_id uuid', t);
+    execute format('update public.%I set company_id = ''00000000-0000-0000-0000-000000000001''::uuid where company_id is null', t);
+    execute format('create index if not exists %I on public.%I(company_id)', 'idx_' || t || '_company', t);
+    execute format('drop trigger if exists %I on public.%I', 'trg_' || t || '_company', t);
+    execute format('create trigger %I before insert on public.%I for each row execute function public.set_company_id()', 'trg_' || t || '_company', t);
+  end loop;
+end;
+$do$;
+
 create or replace function public.current_role()
 returns text
 language sql stable security definer set search_path = public
@@ -1179,6 +1314,8 @@ as $$
          exists (select 1 from public.departments d where d.leader_id = p.id)
     from public.profiles p
    where public.is_active_user()
+     -- 只看本公司同事：平台超管 company_id 为空，普通账号看不到他
+     and public.in_company(p.company_id)
    order by p.created_at;
 $$;
 
@@ -1202,6 +1339,101 @@ as $$
        from public.profiles where id = auth.uid()),
     false
   );
+$$;
+
+-- ---------- 多租户：公司管理（仅平台超管） ----------
+create or replace function public.list_companies()
+returns table (id uuid, name text, code text, status text, note text, member_count bigint, created_at timestamptz)
+language sql stable security definer set search_path = public
+as $$
+  select c.id, c.name, c.code, c.status, c.note,
+         (select count(*) from public.profiles p where p.company_id = c.id),
+         c.created_at
+    from public.companies c
+   where public.is_super_admin()
+   order by c.created_at;
+$$;
+
+create or replace function public.create_company(p_name text, p_code text default null, p_note text default null)
+returns uuid
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_id uuid;
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以创建公司';
+  end if;
+  if p_name is null or length(trim(p_name)) = 0 then
+    raise exception '公司名称不能为空';
+  end if;
+  insert into public.companies (name, code, note)
+  values (trim(p_name), nullif(trim(coalesce(p_code, '')), ''), p_note)
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+create or replace function public.update_company(p_id uuid, p_name text, p_code text, p_status text, p_note text)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以管理公司';
+  end if;
+  if p_name is null or length(trim(p_name)) = 0 then
+    raise exception '公司名称不能为空';
+  end if;
+  update public.companies
+     set name = trim(p_name),
+         code = nullif(trim(coalesce(p_code, '')), ''),
+         status = p_status,
+         note = p_note
+   where id = p_id;
+end;
+$$;
+
+create or replace function public.switch_company(p_company uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以切换公司';
+  end if;
+  if not exists (select 1 from public.companies where id = p_company and status = 'active') then
+    raise exception '公司不存在或已停用';
+  end if;
+  update public.profiles set active_company_id = p_company where id = auth.uid();
+end;
+$$;
+
+-- 管理员建号后把新同事从默认公司拉进本公司。
+-- 走 security definer：新账号此刻还在默认公司，管理员受 RLS 限制看不到他，
+-- 但建号流程拿到了 userId，可以用这个函数完成归属分配。
+create or replace function public.assign_member_company(p_user uuid, p_company uuid)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if not public.is_staff() then
+    raise exception '只有管理员可以分配成员所属公司';
+  end if;
+  if p_company is not distinct from public.current_company_id() then
+    null;
+  else
+    raise exception '只能把成员分配到自己所在的公司';
+  end if;
+  if not exists (
+    select 1 from public.profiles
+     where id = p_user
+       and company_id = '00000000-0000-0000-0000-000000000001'::uuid
+  ) then
+    raise exception '成员不存在，或已经归属其它公司';
+  end if;
+  update public.profiles set company_id = p_company where id = p_user;
+end;
 $$;
 
 -- 部门可见范围：本部门 scope ∪ 上级部门 scope（inherit_parent 为 true 时逐级向上）
@@ -1288,6 +1520,14 @@ begin
 end;
 $do$;
 
+-- ---------- companies（平台级表，普通账号不可直读） ----------
+alter table public.companies enable row level security;
+drop policy if exists "companies_platform_only" on public.companies;
+create policy "companies_platform_only" on public.companies
+  for all to authenticated
+  using (public.is_super_admin())
+  with check (public.is_super_admin());
+
 -- ---------- profiles ----------
 drop policy if exists "profiles_select_own"   on public.profiles;
 drop policy if exists "profiles_update_own"   on public.profiles;
@@ -1297,14 +1537,20 @@ drop policy if exists "profiles_update_self"  on public.profiles;
 drop policy if exists "profiles_update_staff" on public.profiles;
 drop policy if exists "profiles_delete_super" on public.profiles;
 
--- 本人可见自己；管人 / 管组织 / 人事岗（HR）可见全部
+-- 本人可见自己；管人 / 管组织 / 人事岗（HR）只可见本公司成员
+-- 平台超管 company_id 为空，普通账号无法在列表 / 通讯录里看到他
 create policy "profiles_select" on public.profiles
   for select to authenticated
   using (
     id = auth.uid()
-    or public.has_permission('account.manage')
-    or public.has_permission('org.manage')
-    or public.has_permission('hr.view')
+    or (
+      public.in_company(company_id)
+      and (
+        public.has_permission('account.manage')
+        or public.has_permission('org.manage')
+        or public.has_permission('hr.view')
+      )
+    )
   );
 
 -- 本人可改自己的资料（角色 / 状态 / 组织归属由触发器拦截，不能自提权）
@@ -1316,21 +1562,21 @@ create policy "profiles_update_self" on public.profiles
 -- 管理员可改他人档案
 create policy "profiles_update_staff" on public.profiles
   for update to authenticated
-  using (public.is_staff())
-  with check (public.is_staff());
+  using (public.is_staff() and public.in_company(company_id))
+  with check (public.is_staff() and public.in_company(company_id));
 
 -- 人事岗（HR 部门）也能维护他人档案，但触发器 guard_profile_changes 会
 -- 拦住角色 / 岗位角色字段，HR 只能动人事与组织归属，无法借此提权
 drop policy if exists "profiles_update_hr" on public.profiles;
 create policy "profiles_update_hr" on public.profiles
   for update to authenticated
-  using (public.has_permission('hr.manage'))
-  with check (public.has_permission('hr.manage'));
+  using (public.has_permission('hr.manage') and public.in_company(company_id))
+  with check (public.has_permission('hr.manage') and public.in_company(company_id));
 
 -- 仅超级管理员可移除档案，且不能移除自己
 create policy "profiles_delete_super" on public.profiles
   for delete to authenticated
-  using (public.is_super_admin() and id <> auth.uid());
+  using (public.is_super_admin() and public.in_company(company_id) and id <> auth.uid());
 
 -- ---------- 业务表 ----------
 -- 读：{模块}.view / 写：{模块}.edit / 删：data.delete
@@ -1368,19 +1614,19 @@ begin
     execute format('drop policy if exists %I on public.%I', rec.tbl || '_delete',    rec.tbl);
 
     execute format(
-      'create policy %I on public.%I for select to authenticated using (public.has_permission(%L))',
+      'create policy %I on public.%I for select to authenticated using (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_select', rec.tbl, rec.perm || '.view'
     );
     execute format(
-      'create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L))',
+      'create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_insert', rec.tbl, rec.perm || '.edit'
     );
     execute format(
-      'create policy %I on public.%I for update to authenticated using (public.has_permission(%L)) with check (public.has_permission(%L))',
+      'create policy %I on public.%I for update to authenticated using (public.has_permission(%L) and public.in_company(company_id)) with check (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_update', rec.tbl, rec.perm || '.edit', rec.perm || '.edit'
     );
     execute format(
-      'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L))',
+      'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_delete', rec.tbl, 'data.delete'
     );
   end loop;
@@ -1418,19 +1664,19 @@ begin
     execute format('drop policy if exists %I on public.%I', rec.tbl || '_delete', rec.tbl);
 
     execute format(
-      'create policy %I on public.%I for select to authenticated using (public.has_permission(%L))',
+      'create policy %I on public.%I for select to authenticated using (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_select', rec.tbl, rec.perm || '.view'
     );
     execute format(
-      'create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L))',
+      'create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_insert', rec.tbl, rec.perm || '.edit'
     );
     execute format(
-      'create policy %I on public.%I for update to authenticated using (public.has_permission(%L)) with check (public.has_permission(%L))',
+      'create policy %I on public.%I for update to authenticated using (public.has_permission(%L) and public.in_company(company_id)) with check (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_update', rec.tbl, rec.perm || '.edit', rec.perm || '.edit'
     );
     execute format(
-      'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L))',
+      'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L) and public.in_company(company_id))',
       rec.tbl || '_delete', rec.tbl, rec.perm || '.edit'
     );
   end loop;
@@ -1638,6 +1884,8 @@ declare
     'finance_expenses','finance_expense_items','finance_budgets'
   ];
 begin
+  perform public.assert_row_company('profiles', p_from);
+  perform public.assert_row_company('profiles', p_to);
   if not (public.is_staff() or public.has_permission('hr.manage')) then
     raise exception '只有管理员或人事岗可以移交资源';
   end if;
@@ -1697,6 +1945,10 @@ declare
   t     record;
   moved jsonb := '{}'::jsonb;
 begin
+  perform public.assert_row_company('profiles', p_target);
+  if p_handover is not null then
+    perform public.assert_row_company('profiles', p_handover);
+  end if;
   if not (public.is_staff() or public.has_permission('hr.manage')) then
     raise exception '只有管理员或人事岗可以办理离职交接';
   end if;
@@ -1759,6 +2011,7 @@ declare
   r      record;
   target record;
 begin
+  perform public.assert_row_company('access_requests', p_id);
   if not public.has_permission('account.manage') then
     raise exception '只有管理员可以审批权限申请';
   end if;
@@ -1823,6 +2076,30 @@ begin
   -- 这些字段平时只有管理员能改，但函数内部已经做过 hr.manage 与目标角色校验
   if coalesce(current_setting('app.offboarding', true), '') = '1' then
     return new;
+  end if;
+
+  -- 平台超管账号受保护：其他人不能改他的角色 / 状态 / 公司归属
+  if lower(coalesce(old.email, '')) = 'yinsunccess168@163.com'
+     and not public.is_super_admin() then
+    raise exception '不能修改平台超级管理员账号';
+  end if;
+
+  -- 全局超管唯一：只有指定邮箱能持有 super_admin，公司内最高为普通管理员
+  if new.role = 'super_admin'
+     and lower(coalesce(new.email, '')) <> 'yinsunccess168@163.com' then
+    raise exception '公司内最高角色为普通管理员，不能设置超级管理员';
+  end if;
+
+  -- 公司归属不能随意改（防串租户）；仅允许管理员把新同事从默认公司拉进本公司
+  if new.company_id is distinct from old.company_id then
+    if not public.is_super_admin()
+       and not (
+         public.is_staff()
+         and old.company_id = '00000000-0000-0000-0000-000000000001'::uuid
+         and new.company_id = public.current_company_id()
+       ) then
+      raise exception '只有平台超级管理员可以调整账号所属公司';
+    end if;
   end if;
 
   -- 系统角色只能由管理员调整：人事岗（HR）也不行，否则 HR 可以给自己升管理员
@@ -1923,7 +2200,8 @@ as $$
   select coalesce(
     (select round(sum(qty * unit_cost) / nullif(sum(qty), 0), 2)
        from public.stock_movements
-      where sku = p_sku and qty > 0 and unit_cost > 0),
+      where sku = p_sku and qty > 0 and unit_cost > 0
+        and public.in_company(company_id)),
     0);
 $$;
 
@@ -1942,6 +2220,7 @@ declare
   v_user uuid;
   v_qty  integer;
 begin
+  perform public.assert_row_company('stores', p_store_id);
   if p_store_id is null or coalesce(btrim(p_sku), '') = '' then
     return null;                       -- 国内仓或没绑 SKU 时不动店铺库存
   end if;
@@ -1979,6 +2258,7 @@ declare
   v_qty   integer;
   v_cost  numeric(12,2);
 begin
+  perform public.assert_row_company('orders', p_order_id);
   if not public.has_permission('orders.edit') then
     raise exception '没有订单编辑权限';
   end if;
@@ -2038,6 +2318,7 @@ declare
   m record;
   v_back integer := 0;
 begin
+  perform public.assert_row_company('orders', p_order_id);
   if not public.has_permission('orders.edit') then
     raise exception '没有订单编辑权限';
   end if;
@@ -2073,8 +2354,10 @@ create or replace function public.po_total(p_po_id uuid)
 returns numeric
 language sql stable security definer set search_path = public
 as $$
-  select coalesce((select sum(amount) from public.purchase_items where po_id = p_po_id), 0)
-       + coalesce((select shipping_fee + other_fee from public.purchase_orders where id = p_po_id), 0);
+  select coalesce((select sum(amount) from public.purchase_items
+                    where po_id = p_po_id and public.in_company(company_id)), 0)
+       + coalesce((select shipping_fee + other_fee from public.purchase_orders
+                    where id = p_po_id and public.in_company(company_id)), 0);
 $$;
 
 -- ---------- 采购审核：提交（采购员）/ 通过或驳回（财务） ----------
@@ -2088,6 +2371,7 @@ as $$
 declare
   po record;
 begin
+  perform public.assert_row_company('purchase_orders', p_po_id);
   if not public.has_permission('purchase.edit') then
     raise exception '没有采购编辑权限';
   end if;
@@ -2119,6 +2403,7 @@ declare
   po     record;
   v_role text;
 begin
+  perform public.assert_row_company('purchase_orders', p_po_id);
   if not public.has_permission('finance.audit') then
     raise exception '没有采购财务审核权限';
   end if;
@@ -2166,6 +2451,7 @@ declare
   v_total  numeric(14,2);
   v_status text;
 begin
+  perform public.assert_row_company('purchase_orders', p_po_id);
   if not public.has_permission('purchase.edit') then
     raise exception '没有采购编辑权限';
   end if;
@@ -2212,6 +2498,7 @@ as $$
 declare
   ex record;
 begin
+  perform public.assert_row_company('finance_expenses', p_expense_id);
   if not public.has_permission('expense.edit') then
     raise exception '没有费用编辑权限';
   end if;
@@ -2242,6 +2529,7 @@ declare
   ex     record;
   v_role text;
 begin
+  perform public.assert_row_company('finance_expenses', p_expense_id);
   if not public.has_permission('finance.audit') then
     raise exception '没有费用财务审核权限';
   end if;
@@ -2284,6 +2572,7 @@ as $$
 declare
   ex record;
 begin
+  perform public.assert_row_company('finance_expenses', p_expense_id);
   if not public.has_permission('expense.edit') then
     raise exception '没有费用编辑权限';
   end if;
@@ -2332,6 +2621,7 @@ declare
   v_skus   text[] := '{}';
   v_rows   jsonb := '[]'::jsonb;
 begin
+  perform public.assert_row_company('purchase_orders', p_po_id);
   if not public.has_permission('purchase.edit') then
     raise exception '没有采购编辑权限';
   end if;
@@ -2424,10 +2714,13 @@ language plpgsql stable security definer set search_path = public
 as $$
 #variable_conflict use_column
 begin
+  if p_store_id is not null then
+    perform public.assert_row_company('stores', p_store_id);
+  end if;
   return query
   with lead as (
     select coalesce(round(avg(lead_time_days))::integer, 30) as d
-      from public.suppliers where status = 'active'
+      from public.suppliers where status = 'active' and public.in_company(company_id)
   ),
   sales as (
     select o.sku, o.store_id, sum(o.quantity)::numeric / 30.0 as daily
@@ -2435,6 +2728,7 @@ begin
      where o.order_date >= current_date - 30
        and o.status not in ('cancelled', 'refunded')
        and coalesce(btrim(o.sku), '') <> ''
+       and public.in_company(o.company_id)
      group by o.sku, o.store_id
   ),
   inv as (
@@ -2445,6 +2739,7 @@ begin
            max(i.title)                            as title,
            max(i.product_id::text)::uuid           as product_id
       from public.inventory i
+     where public.in_company(i.company_id)
      group by i.sku, i.store_id
   ),
   po as (
@@ -2454,6 +2749,7 @@ begin
           from public.purchase_items pi
           join public.purchase_orders p on p.id = pi.po_id
          where p.status in ('ordered', 'partial')
+           and public.in_company(p.company_id)
         union all
         select tr.sku, tr.store_id, (tr.qty - tr.received_qty)::bigint
           from public.stock_transfers tr
@@ -2509,6 +2805,16 @@ declare
   v_amt    numeric(14,2) := 0;
   v_lead   integer := 30;
 begin
+  -- 可选关联对象都要落在当前公司，避免跨租户生成采购单
+  if p_store_id is not null then
+    perform public.assert_row_company('stores', p_store_id);
+  end if;
+  if p_order_id is not null then
+    perform public.assert_row_company('orders', p_order_id);
+  end if;
+  if p_supplier_id is not null then
+    perform public.assert_row_company('suppliers', p_supplier_id);
+  end if;
   if not public.has_permission('purchase.edit') then
     raise exception '没有采购编辑权限';
   end if;
@@ -2572,6 +2878,7 @@ declare
   v_order  record;
   v_result jsonb;
 begin
+  perform public.assert_row_company('orders', p_order_id);
   if not public.has_permission('orders.view') then
     raise exception '没有订单查看权限';
   end if;
@@ -2660,6 +2967,7 @@ declare
   v_seq   integer;
   v_id    uuid;
 begin
+  perform public.assert_row_company('orders', p_order_id);
   if not (public.has_permission('orders.edit') or public.has_permission('inventory.edit')) then
     raise exception '没有订单或库存编辑权限';
   end if;
@@ -2731,6 +3039,7 @@ declare
   v_left  integer;
   v_done  boolean;
 begin
+  perform public.assert_row_company('stock_transfers', p_transfer_id);
   if not public.has_permission('inventory.edit') then
     raise exception '没有库存编辑权限';
   end if;
@@ -2786,6 +3095,7 @@ declare
   v_advice    text;
   v_need      integer;
 begin
+  perform public.assert_row_company('orders', p_order_id);
   if not public.has_permission('orders.view') then
     raise exception '没有订单查看权限';
   end if;
@@ -2886,6 +3196,7 @@ declare
   v_score      numeric;
   v_grade      text;
 begin
+  perform public.assert_row_company('profiles', p_profile_id);
   if not (public.has_permission('performance.view') or p_profile_id = auth.uid()) then
     raise exception '没有绩效查看权限';
   end if;
@@ -2987,6 +3298,7 @@ declare
   m       jsonb;
   v_dept  uuid;
 begin
+  perform public.assert_row_company('profiles', p_profile_id);
   if not public.has_permission('performance.edit') then
     raise exception '没有绩效评定权限';
   end if;
@@ -3052,6 +3364,16 @@ grant execute on function public.decide_access_request(uuid, boolean, text) to a
 grant execute on function public.has_permission(text) to authenticated;
 grant execute on function public.dept_scope(uuid) to authenticated;
 grant execute on function public.team_directory() to authenticated;
+
+-- 多租户：公司表本身不开放直读（无 RLS），一切通过下面的函数并按超管 / 管理员身份校验
+grant execute on function public.current_company_id() to authenticated;
+grant execute on function public.in_company(uuid) to authenticated;
+grant execute on function public.assert_row_company(text, uuid) to authenticated;
+grant execute on function public.list_companies() to authenticated;
+grant execute on function public.create_company(text, text, text) to authenticated;
+grant execute on function public.update_company(uuid, text, text, text, text) to authenticated;
+grant execute on function public.switch_company(uuid) to authenticated;
+grant execute on function public.assign_member_company(uuid, uuid) to authenticated;
 
 -- 业务链路函数：函数内部各自校验权限，不能靠 grant 兜底
 grant execute on function public.sku_avg_cost(text)                          to authenticated;

@@ -27,6 +27,25 @@ import AccessFlow from './pages/AccessFlow'
 import Org from './pages/Org'
 import Performance from './pages/Performance'
 import Settings from './pages/Settings'
+import Companies from './pages/Companies'
+
+/** 平台级页面守卫：公司管理只有全局超管能进，公司内普通管理员也看不到入口 */
+function RequireSuperAdmin({ children }: { children: ReactNode }) {
+  const { isSuperAdmin } = useAuth()
+  if (isSuperAdmin) return <>{children}</>
+  return (
+    <div className="card p-10 text-center">
+      <div className="w-11 h-11 rounded-xl bg-ink-100 text-ink-400 flex items-center justify-center mx-auto">
+        <Lock className="w-5 h-5" />
+      </div>
+      <p className="mt-3 text-[14px] font-medium text-ink-800">只有平台超级管理员可以进入</p>
+      <p className="mt-1 text-[12.5px] text-ink-500">公司管理属于平台级功能，各公司账号无法访问。</p>
+      <Link to="/" className="inline-block mt-4">
+        <Button size="sm">返回运营概览</Button>
+      </Link>
+    </div>
+  )
+}
 
 function FullScreenLoader({ label = '正在加载工作台…' }: { label?: string }) {
   return (
@@ -185,6 +204,14 @@ function AppRoutes() {
         {/* 权限流程全员可见：普通成员在这里提交申请、看自己的变动记录 */}
         <Route path="access" element={<AccessFlow />} />
         <Route path="settings" element={<Settings />} />
+        <Route
+          path="companies"
+          element={
+            <RequireSuperAdmin>
+              <Companies />
+            </RequireSuperAdmin>
+          }
+        />
         <Route path="setup" element={<Setup />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

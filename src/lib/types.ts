@@ -29,6 +29,21 @@ export interface Profile {
   employee_no?: string | null
   phone?: string | null
   wechat?: string | null
+  /** 多租户：所属公司（平台超管不属于任何公司，为 null） */
+  company_id?: string | null
+  /** 平台超管当前切换的管理视角公司 */
+  active_company_id?: string | null
+}
+
+/** 公司（租户） */
+export interface Company {
+  id: string
+  name: string
+  code: string | null
+  status: string
+  note: string | null
+  member_count: number
+  created_at: string
 }
 
 /* ---------------- 权限流程 ---------------- */

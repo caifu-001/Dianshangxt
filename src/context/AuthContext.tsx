@@ -25,6 +25,8 @@ interface AuthContextValue {
   role: Role
   isStaff: boolean
   isSuperAdmin: boolean
+  /** 当前数据视角所属公司：普通账号=所属公司，平台超管=切换后的公司 */
+  currentCompanyId: string | null
   /** 有效权限码（系统角色上限 ∩ 自定义角色范围） */
   permissions: PermissionCode[]
   /** 权限判定，界面可见性统一走这里 */
@@ -263,6 +265,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       role,
       isStaff: checkStaff(role),
       isSuperAdmin: checkSuper(role),
+      currentCompanyId:
+        checkSuper(role)
+          ? profile?.active_company_id ?? '00000000-0000-0000-0000-000000000001'
+          : profile?.company_id ?? null,
       permissions,
       can: (code: PermissionCode) => allowed.has(code),
       customRole,

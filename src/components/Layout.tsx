@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   BarChart3,
   Boxes,
+  Building2,
   ChevronDown,
   CheckSquare,
   Database,
@@ -47,6 +48,8 @@ const NAV_GROUPS: Array<{
     perm?: PermissionCode
     /** 满足任意一个权限码即显示（部门职能、管理权限等组合场景） */
     perms?: PermissionCode[]
+    /** 仅平台超级管理员可见 */
+    superOnly?: boolean
   }>
 }> = [
   {
@@ -93,10 +96,16 @@ const NAV_GROUPS: Array<{
       { to: '/access', label: '权限流程', icon: ShieldCheck },
     ],
   },
+  {
+    title: '平台',
+    items: [
+      { to: '/companies', label: '公司管理', icon: Building2, superOnly: true },
+    ],
+  },
 ]
 
 export default function AppLayout() {
-  const { profile, user, signOut, schemaReady, role, can, customRole, mustChangePassword } = useAuth()
+  const { profile, user, signOut, schemaReady, role, isSuperAdmin, can, customRole, mustChangePassword } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [pendingApprovals, setPendingApprovals] = useState(0)
@@ -130,6 +139,7 @@ export default function AppLayout() {
     ...group,
     items: group.items
       .filter((item) => {
+        if (item.superOnly && !isSuperAdmin) return false
         if (item.perms && item.perms.length > 0) return item.perms.some((code) => can(code))
         return !item.perm || can(item.perm)
       })

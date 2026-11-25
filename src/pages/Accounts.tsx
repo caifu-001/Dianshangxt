@@ -132,7 +132,7 @@ function employmentOf(p: Profile): EmploymentStatus {
 }
 
 export default function Accounts() {
-  const { user, profile: me, role, isSuperAdmin, can } = useAuth()
+  const { user, profile: me, role, isSuperAdmin, currentCompanyId, can } = useAuth()
   const { push } = useToast()
   const canAdmin = can('account.manage')
   const canHr = can('hr.manage')
@@ -380,7 +380,21 @@ export default function Accounts() {
       return
     }
 
-    // 登录凭据已建好，下面补组织归属与人事状态。
+    // 多租户：新账号默认落在「默认公司」，管理员受 RLS 限制看不到也改不了，
+    // 先用函数把它划进当前公司，再补组织归属与人事状态。
+    if (currentCompanyId) {
+      try {
+        await callRpc('assign_member_company', { p_user: userId, p_company: currentCompanyId })
+      } catch (err) {
+        push(
+          `登录账号已创建，但公司归属分配失败（${err instanceof Error ? err.message : '未知错误'}）。请先在数据源页执行最新脚本后重试。`,
+          'error',
+        )
+        setCreateLoading(false)
+        return
+      }
+    }
+
     // 这一步失败不影响账号本身，但要让管理员知道需要手工补。
     try {
       await updateRow<Profile>('profiles', userId, {
