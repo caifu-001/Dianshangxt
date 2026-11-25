@@ -4,6 +4,18 @@
 
 > 技术栈：React 18 + TypeScript + Vite + TailwindCSS + Recharts + Supabase (PostgreSQL)
 
+![运营概览](docs/preview-dashboard.png)
+
+<details>
+<summary>更多界面预览</summary>
+
+![订单管理](docs/preview-orders.png)
+
+![利润核算](docs/preview-profit.png)
+
+</details>
+
+
 ---
 
 ## 功能模块
