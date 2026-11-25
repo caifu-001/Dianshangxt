@@ -67,6 +67,7 @@ export type PermissionCode =
   | 'competitors.view' | 'competitors.edit'
   | 'brand.view' | 'brand.edit'
   | 'dev.view' | 'dev.edit'
+  | 'expense.view' | 'expense.edit'
   | 'profit.view' | 'profit.edit'
   | 'tasks.view' | 'tasks.edit'
   | 'performance.view' | 'performance.edit'
@@ -95,6 +96,7 @@ export const MODULES: ModuleDef[] = [
   { key: 'inventory', label: '库存管理', desc: '库存水位与补货建议', view: 'inventory.view', edit: 'inventory.edit', group: '交易' },
   { key: 'purchase', label: '采购管理', desc: '供应商、采购单与到货入库', view: 'purchase.view', edit: 'purchase.edit', group: '交易' },
   { key: 'profit', label: '利润核算', desc: 'P&L 与费用台账', view: 'profit.view', edit: 'profit.edit', group: '交易' },
+  { key: 'expenses', label: '费用管理', desc: '研发 / 营销 / 薪酬社保 / 差旅等费用单、预算与审批', view: 'expense.view', edit: 'expense.edit', group: '交易' },
   { key: 'ads', label: '广告投放', desc: '广告活动与 ACOS', view: 'ads.view', edit: 'ads.edit', group: '增长' },
   { key: 'creators', label: '达人合作', desc: 'TikTok 达人建联与内容', view: 'creators.view', edit: 'creators.edit', group: '增长' },
   { key: 'competitors', label: '竞品分析', desc: '竞品价格、评分与排名监控', view: 'competitors.view', edit: 'competitors.edit', group: '增长' },
@@ -107,7 +109,7 @@ export const MODULES: ModuleDef[] = [
 export const FUNCTION_META: Record<string, { label: string; desc: string }> = {
   'hr.view': { label: '人事档案', desc: '查看花名册、入离职记录与人员变动流水' },
   'hr.manage': { label: '入离职办理', desc: '开通账号、确认入职、办理离职与资源移交' },
-  'finance.audit': { label: '采购财务审核', desc: '审核采购单金额与付款条件，通过后才能登记付款' },
+  'finance.audit': { label: '财务审核', desc: '审核采购单与费用单，通过后才能登记付款' },
 }
 
 export const FUNCTION_CODES: PermissionCode[] = ['hr.view', 'hr.manage', 'finance.audit']
@@ -179,8 +181,8 @@ export const DEPT_TEMPLATES: DeptTemplate[] = [
     key: 'fin',
     name: '财务部',
     code: 'FIN',
-    desc: '利润核算、采购财务审核与费用台账，订单、采购、商品只读',
-    scope: ['profit.view', 'profit.edit', 'orders.view', 'purchase.view', 'products.view', 'stores.view', 'performance.view', 'finance.audit'],
+    desc: '利润核算、费用管理、采购与费用财务审核，订单、采购、商品只读',
+    scope: ['profit.view', 'profit.edit', 'expense.view', 'expense.edit', 'orders.view', 'purchase.view', 'products.view', 'stores.view', 'performance.view', 'finance.audit'],
   },
 ]
 

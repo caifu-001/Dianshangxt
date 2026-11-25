@@ -707,3 +707,73 @@ export interface DevCost {
   note: string | null
   created_at: string
 }
+
+/* ---------------- 费用管理 ---------------- */
+export type ExpenseCategory = 'rd' | 'marketing' | 'payroll' | 'travel' | 'office' | 'other'
+export type ExpenseStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'paid'
+
+/** 费用单主表：一张单多条明细，金额由明细汇总 */
+export interface FinanceExpense {
+  id: string
+  user_id: string
+  code: string
+  title: string
+  category: ExpenseCategory
+  subcategory: string | null
+  owner_id: string | null
+  department_id: string | null
+  store_id: string | null
+  project_id: string | null
+  amount: number
+  currency: string
+  expense_date: string
+  status: ExpenseStatus
+  approved_by: string | null
+  approved_at: string | null
+  approval_note: string | null
+  paid_at: string | null
+  payment_method: string | null
+  voucher_no: string | null
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 费用明细：差旅分项 / 工资社保分项 / 研发投入分项 */
+export interface FinanceExpenseItem {
+  id: string
+  user_id: string
+  expense_id: string
+  category: ExpenseCategory
+  item: string
+  qty: number
+  unit_price: number
+  amount: number
+  employee_id: string | null
+  note: string | null
+  created_at: string
+}
+
+/** 预算：按「分类 + 部门 + 月份」设置额度 */
+export interface FinanceBudget {
+  id: string
+  user_id: string
+  category: ExpenseCategory
+  department_id: string | null
+  period: string
+  amount: number
+  currency: string
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 审批流水：提交 / 通过 / 驳回 / 撤回 / 付款 */
+export interface FinanceExpenseApproval {
+  id: string
+  user_id: string
+  expense_id: string
+  action: 'submit' | 'approve' | 'reject' | 'revoke' | 'pay'
+  note: string | null
+  created_at: string
+}

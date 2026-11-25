@@ -259,3 +259,77 @@ export const PAY_METHODS = [
   { value: 'cash', label: '现金' },
   { value: 'other', label: '其他' },
 ]
+
+/* ------------------------------------------------------------------ */
+/*  费用管理：提交 / 审核 / 付款都走数据库函数，闸门不会被绕过          */
+/* ------------------------------------------------------------------ */
+
+/** 费用单提交审核（已审核未付款的单再次调用 = 撤回重审） */
+export function submitExpense(expenseId: string, note?: string) {
+  return callRpc<{ ok: boolean; status: 'pending' }>('submit_expense', {
+    p_expense_id: expenseId,
+    p_note: note ?? null,
+  })
+}
+
+/** 费用单财务审核：通过后才能付款 */
+export function approveExpense(expenseId: string, decision: 'approved' | 'rejected', note?: string) {
+  return callRpc<{ ok: boolean; status: 'approved' | 'rejected' }>('approve_expense', {
+    p_expense_id: expenseId,
+    p_decision: decision,
+    p_note: note ?? null,
+  })
+}
+
+/** 费用付款登记：数据库强制要求已审核 */
+export function payExpense(
+  expenseId: string,
+  paidAt?: string,
+  method = 'bank',
+  voucher?: string,
+  note?: string,
+) {
+  return callRpc<{ ok: boolean; status: 'paid'; amount: number }>('pay_expense', {
+    p_expense_id: expenseId,
+    p_paid_at: paidAt ?? null,
+    p_method: method,
+    p_voucher: voucher ?? null,
+    p_note: note ?? null,
+  })
+}
+
+/** 费用单状态样式 */
+export const EXPENSE_STATUS_META: Record<string, { label: string; cls: string }> = {
+  draft: { label: '草稿', cls: 'bg-ink-100 text-ink-600 border-ink-200/70' },
+  pending: { label: '待财务审核', cls: 'bg-amber-50 text-amber-700 border-amber-200/70' },
+  approved: { label: '已通过待付款', cls: 'bg-teal-50 text-teal-700 border-teal-200/70' },
+  rejected: { label: '已驳回', cls: 'bg-rose-50 text-rose-700 border-rose-200/70' },
+  paid: { label: '已付款', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
+}
+
+export const EXPENSE_CATEGORY_META: Record<string, { label: string; tone: string }> = {
+  rd: { label: '研发投入', tone: 'bg-violet-50 text-violet-700' },
+  marketing: { label: '营销投入', tone: 'bg-brand-50 text-brand-700' },
+  payroll: { label: '工资社保', tone: 'bg-blue-50 text-blue-700' },
+  travel: { label: '差旅费用', tone: 'bg-orange-50 text-orange-700' },
+  office: { label: '办公行政', tone: 'bg-teal-50 text-teal-700' },
+  other: { label: '其他费用', tone: 'bg-ink-100 text-ink-600' },
+}
+
+/** 各类别的常用明细科目，新建费用时可直接选用 */
+export const EXPENSE_SUB_ITEMS: Record<string, string[]> = {
+  rd: ['打样费', '模具治具', '认证检测', '设计版权', '软件工具', '测试费用', '样品采购'],
+  marketing: ['广告投放', '达人佣金', '站外红人', 'PR 公关', '内容制作', '促销活动', '平台费用'],
+  payroll: ['基本工资', '绩效奖金', '社保', '公积金', '补贴', '个税', '招聘费用'],
+  travel: ['机票 / 车票', '住宿', '餐饮', '市内交通', '签证 / 保险', '其他差旅'],
+  office: ['房租物业', '水电网络', '办公用品', '软件订阅', '通讯费', '设备采购'],
+  other: ['税费', '头程物流', '仓储费', '其他支出'],
+}
+
+export const EXPENSE_APPROVAL_ACTION_META: Record<string, { label: string; cls: string }> = {
+  submit: { label: '提交审核', cls: 'text-brand-600' },
+  revoke: { label: '撤回重审', cls: 'text-amber-600' },
+  approve: { label: '审核通过', cls: 'text-emerald-600' },
+  reject: { label: '审核驳回', cls: 'text-rose-600' },
+  pay: { label: '登记付款', cls: 'text-violet-600' },
+}

@@ -21,6 +21,7 @@ import Competitors from './pages/Competitors'
 import Brand from './pages/Brand'
 import Development from './pages/Development'
 import Profit from './pages/Profit'
+import Expenses from './pages/Expenses'
 import Tasks from './pages/Tasks'
 import Accounts from './pages/Accounts'
 import AccessFlow from './pages/AccessFlow'
@@ -160,6 +161,7 @@ function AppRoutes() {
         <Route path="competitors" element={<RequirePermission perm="competitors.view"><Competitors /></RequirePermission>} />
         <Route path="brand" element={<RequirePermission perm="brand.view"><Brand /></RequirePermission>} />
         <Route path="profit" element={<RequirePermission perm="profit.view"><Profit /></RequirePermission>} />
+        <Route path="expenses" element={<RequirePermission perm="expense.view"><Expenses /></RequirePermission>} />
         <Route path="tasks" element={<RequirePermission perm="tasks.view"><Tasks /></RequirePermission>} />
         <Route path="performance" element={<Performance />} />
         {/* 组织架构对全员可见（通讯录），编辑按钮按 org.manage 收敛 */}

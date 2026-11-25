@@ -25,6 +25,7 @@ import {
   Telescope,
   Target,
   Truck,
+  Wallet,
   UserCog,
   Users,
   X,
@@ -67,6 +68,7 @@ const NAV_GROUPS: Array<{
       { to: '/purchase', label: '采购管理', icon: Truck, perm: 'purchase.view' },
       { to: '/suppliers', label: '供应商库', icon: Factory, perm: 'purchase.view' },
       { to: '/profit', label: '利润核算', icon: BarChart3, perm: 'profit.view' },
+      { to: '/expenses', label: '费用管理', icon: Wallet, perm: 'expense.view' },
     ],
   },
   {

@@ -948,6 +948,116 @@ do $$ begin
     check (stage in ('research', 'proposal', 'sample', 'testing', 'mass', 'launch'));
 end $$;
 
+-- -------------------------------------------------------------
+-- 12c. 费用管理：费用单 / 明细 / 预算 / 审批流水
+--   费用单覆盖研发、营销、薪酬社保、差旅、办公与其他支出；
+--   一张单多条明细，金额由明细汇总落库（触发器），避免主表与明细对不上。
+--   薪酬社保明细可指向具体员工，研发投入可指向开发项目，营销可指向店铺。
+--   审批闸门：draft→submit→approve→pay，未审核不能付款（与采购同构）。
+-- -------------------------------------------------------------
+create table if not exists public.finance_expenses (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  code          text not null unique,             -- 单号 FY202611-0001
+  title         text not null,
+  category      text not null default 'other',    -- rd / marketing / payroll / travel / office / other
+  subcategory   text,
+  owner_id      uuid references public.profiles(id) on delete set null,  -- 费用归属人（工资社保指向员工）
+  department_id uuid references public.departments(id) on delete set null,
+  store_id      uuid references public.stores(id) on delete set null,
+  project_id    uuid references public.dev_projects(id) on delete set null,
+  amount        numeric(14,2) not null default 0, -- 由明细汇总
+  currency      text not null default 'CNY',
+  expense_date  date not null default current_date,
+  status        text not null default 'draft',    -- draft / pending / approved / rejected / paid
+  approved_by   uuid references public.profiles(id) on delete set null,
+  approved_at   timestamptz,
+  approval_note text,
+  paid_at       date,
+  payment_method text,
+  voucher_no    text,
+  note          text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create index if not exists idx_finance_expenses_date on public.finance_expenses(expense_date desc);
+create index if not exists idx_finance_expenses_cat on public.finance_expenses(category, expense_date desc);
+create index if not exists idx_finance_expenses_status on public.finance_expenses(status);
+
+-- 明细：差旅按交通/住宿/餐补逐条，工资按基本工资/社保/公积金逐条
+create table if not exists public.finance_expense_items (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  expense_id  uuid not null references public.finance_expenses(id) on delete cascade,
+  category    text not null default 'other',
+  item        text not null,
+  qty         numeric(12,2) not null default 1,
+  unit_price  numeric(14,2) not null default 0,
+  amount      numeric(14,2) not null default 0,   -- qty * unit_price
+  employee_id uuid references public.profiles(id) on delete set null,
+  note        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_finance_expense_items_expense on public.finance_expense_items(expense_id);
+
+-- 预算：按「分类 + 部门 + 月份」设额度，部门为空表示公司级
+create table if not exists public.finance_budgets (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  category      text not null default 'other',
+  department_id uuid references public.departments(id) on delete set null,
+  period        text not null,                   -- YYYY-MM
+  amount        numeric(14,2) not null default 0,
+  currency      text not null default 'CNY',
+  note          text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create unique index if not exists uq_finance_budget_scope
+  on public.finance_budgets (category, period, coalesce(department_id, '00000000-0000-0000-0000-000000000000'::uuid));
+
+-- 审批流水：提交 / 通过 / 驳回 / 撤回 / 付款只追加不修改
+create table if not exists public.finance_expense_approvals (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  expense_id  uuid not null references public.finance_expenses(id) on delete cascade,
+  action      text not null check (action in ('submit','approve','reject','revoke','pay')),
+  note        text,
+  created_at  timestamptz not null default now()
+);
+create index if not exists idx_finance_expense_appr_expense on public.finance_expense_approvals(expense_id, created_at desc);
+
+do $$ begin
+  alter table public.finance_expenses drop constraint if exists finance_expenses_status_chk;
+  alter table public.finance_expenses add constraint finance_expenses_status_chk
+    check (status in ('draft','pending','approved','rejected','paid'));
+end $$;
+
+-- 明细汇总金额：金额只认明细，改明细即回写主表（含删明细）
+create or replace function public.sync_finance_expense_total()
+returns trigger language plpgsql security definer set search_path = public
+as $$
+declare
+  v_id uuid;
+begin
+  if tg_op = 'DELETE' then
+    v_id := old.expense_id;
+  else
+    v_id := new.expense_id;
+  end if;
+  update public.finance_expenses
+     set amount = coalesce((select sum(amount) from public.finance_expense_items where expense_id = v_id), 0),
+         updated_at = now()
+   where id = v_id;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+drop trigger if exists trg_finance_expense_item_total on public.finance_expense_items;
+create trigger trg_finance_expense_item_total
+after insert or update or delete on public.finance_expense_items
+for each row execute function public.sync_finance_expense_total();
+
 -- =============================================================
 --  行级安全（RLS）与角色权限
 --  权限模型：团队共享同一份业务数据，按角色控制「可删 / 可管人」
@@ -1097,7 +1207,8 @@ declare
     'departments','positions','roles','access_requests','employee_events',
     'performance_reviews','stock_movements','stock_transfers','purchase_payments','purchase_approvals',
     'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics',
-    'dev_projects','dev_milestones','dev_costs'
+    'dev_projects','dev_milestones','dev_costs',
+    'finance_expenses','finance_expense_items','finance_budgets','finance_expense_approvals'
   ];
 begin
   foreach t in array tabs loop
@@ -1174,7 +1285,8 @@ begin
       ('brand_influencers', 'brand'),
       ('brand_pr_contacts', 'brand'),
       ('brand_metrics', 'brand'),
-      ('dev_projects', 'dev')
+      ('dev_projects', 'dev'),
+      ('finance_expenses', 'expense')
     ) as v(tbl, perm)
   loop
     -- 清理历史策略（旧版为 xxx_owner_all，按 user_id 隔离）
@@ -1223,7 +1335,10 @@ begin
       ('supplier_contacts',    'purchase'),
       ('purchase_approvals',   'purchase'),
       ('dev_milestones',       'dev'),
-      ('dev_costs',            'dev')
+      ('dev_costs',            'dev'),
+      ('finance_expense_items',      'expense'),
+      ('finance_budgets',            'expense'),
+      ('finance_expense_approvals',  'expense')
     ) as v(tbl, perm)
   loop
     execute format('drop policy if exists %I on public.%I', rec.tbl || '_select', rec.tbl);
@@ -1448,7 +1563,8 @@ declare
   tabs  text[] := array[
     'stores','products','orders','inventory','campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','supplier_products','purchase_orders','purchase_items',
-    'stock_movements','stock_transfers','brand_social_accounts','brand_influencers','brand_pr_contacts'
+    'stock_movements','stock_transfers','brand_social_accounts','brand_influencers','brand_pr_contacts',
+    'finance_expenses','finance_expense_items','finance_budgets'
   ];
 begin
   if not (public.is_staff() or public.has_permission('hr.manage')) then
@@ -2012,6 +2128,112 @@ begin
    where id = po.id;
 
   return jsonb_build_object('ok', true, 'paid', v_paid, 'total', v_total, 'status', v_status);
+end;
+$$;
+
+-- ---------- 费用单提交审核（费用经办人）/ 撤回重审 ----------
+create or replace function public.submit_expense(
+  p_expense_id uuid,
+  p_note       text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  ex record;
+begin
+  if not public.has_permission('expense.edit') then
+    raise exception '没有费用编辑权限';
+  end if;
+  select * into ex from public.finance_expenses where id = p_expense_id for update;
+  if not found then raise exception '费用单不存在'; end if;
+  if ex.status = 'paid' then raise exception '已付款的费用单不能撤回审核'; end if;
+  if coalesce(ex.amount, 0) <= 0 then raise exception '费用金额必须大于 0，请先录入明细'; end if;
+
+  update public.finance_expenses
+     set status = 'pending', approved_by = null, approved_at = null,
+         approval_note = nullif(btrim(coalesce(p_note, '')), ''), updated_at = now()
+   where id = ex.id;
+  insert into public.finance_expense_approvals (user_id, expense_id, action, note)
+  values (auth.uid(), ex.id, case when ex.status = 'approved' then 'revoke' else 'submit' end, p_note);
+  return jsonb_build_object('ok', true, 'status', 'pending');
+end;
+$$;
+
+-- ---------- 费用单财务审核：通过 / 驳回（复用 finance.audit） ----------
+create or replace function public.approve_expense(
+  p_expense_id uuid,
+  p_decision   text,
+  p_note       text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  ex     record;
+  v_role text;
+begin
+  if not public.has_permission('finance.audit') then
+    raise exception '没有费用财务审核权限';
+  end if;
+  if coalesce(p_decision, '') not in ('approved', 'rejected') then
+    raise exception '审核结果只能是 approved 或 rejected';
+  end if;
+  select * into ex from public.finance_expenses where id = p_expense_id for update;
+  if not found then raise exception '费用单不存在'; end if;
+  if ex.status <> 'pending' then
+    raise exception '费用单不在待审核状态，如需变更请先撤回重新提交';
+  end if;
+  select role into v_role from public.profiles where id = auth.uid();
+  if ex.user_id = auth.uid() and coalesce(v_role, 'member') <> 'super_admin' then
+    raise exception '不能审核自己提交的费用单';
+  end if;
+
+  update public.finance_expenses
+     set status = p_decision,
+         approved_by = auth.uid(),
+         approved_at = now(),
+         approval_note = nullif(btrim(coalesce(p_note, '')), ''),
+         updated_at = now()
+   where id = ex.id;
+  insert into public.finance_expense_approvals (user_id, expense_id, action, note)
+  values (auth.uid(), ex.id, p_decision, p_note);
+  return jsonb_build_object('ok', true, 'status', p_decision);
+end;
+$$;
+
+-- ---------- 费用付款登记：先审核后付款，闸门写在数据库里 ----------
+create or replace function public.pay_expense(
+  p_expense_id   uuid,
+  p_paid_at      date default current_date,
+  p_method       text default 'bank',
+  p_voucher      text default null,
+  p_note         text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  ex record;
+begin
+  if not public.has_permission('expense.edit') then
+    raise exception '没有费用编辑权限';
+  end if;
+  select * into ex from public.finance_expenses where id = p_expense_id for update;
+  if not found then raise exception '费用单不存在'; end if;
+  if ex.status = 'paid' then raise exception '该费用单已付款，请勿重复登记'; end if;
+  if ex.status <> 'approved' then
+    raise exception '费用单未通过财务审核，不能登记付款';
+  end if;
+
+  update public.finance_expenses
+     set status = 'paid',
+         paid_at = coalesce(p_paid_at, current_date),
+         payment_method = coalesce(nullif(btrim(coalesce(p_method, '')), ''), 'bank'),
+         voucher_no = nullif(btrim(coalesce(p_voucher, '')), ''),
+         note = coalesce(p_note, ex.note),
+         updated_at = now()
+   where id = ex.id;
+  insert into public.finance_expense_approvals (user_id, expense_id, action, note)
+  values (auth.uid(), ex.id, 'pay', p_note);
+  return jsonb_build_object('ok', true, 'status', 'paid', 'amount', ex.amount);
 end;
 $$;
 
@@ -2745,6 +2967,8 @@ grant select, insert, update, delete on
   public.dev_projects, public.dev_milestones, public.dev_costs,
   public.brand_social_accounts, public.brand_influencers,
   public.brand_pr_contacts, public.brand_metrics,
+  public.finance_expenses, public.finance_expense_items,
+  public.finance_budgets, public.finance_expense_approvals,
   public.departments, public.positions, public.roles,
   public.access_requests, public.employee_events, public.performance_reviews,
   public.stock_movements, public.stock_transfers, public.purchase_payments
@@ -2776,6 +3000,9 @@ grant execute on function public.create_stock_transfer(uuid, integer, text, text
 grant execute on function public.receive_stock_transfer(uuid, integer, text) to authenticated;
 grant execute on function public.member_metrics(uuid, text)                  to authenticated;
 grant execute on function public.apply_performance_score(uuid, text)         to authenticated;
+grant execute on function public.submit_expense(uuid, text)                  to authenticated;
+grant execute on function public.approve_expense(uuid, text, text)           to authenticated;
+grant execute on function public.pay_expense(uuid, date, text, text, text)   to authenticated;
 
 -- -------------------------------------------------------------
 -- 默认组织数据（按部门编码判重，只补缺的，不会覆盖你已有的配置）
@@ -2928,7 +3155,15 @@ begin
       ('财务审核员', 'finance.audit'), ('财务审核员', 'purchase.view'),
       ('运营专员',   'dev.view'), ('运营专员', 'dev.edit'),
       ('产品开发专员', 'dev.view'), ('产品开发专员', 'dev.edit'),
-      ('只读观察员', 'dev.view')
+      ('只读观察员', 'dev.view'),
+      -- 费用管理：经办人可记账提交，财务有审核权（finance.audit 已授予财务角色）
+      ('财务核算',   'expense.view'), ('财务核算',   'expense.edit'),
+      ('财务审核员', 'expense.view'), ('财务审核员', 'expense.edit'),
+      ('运营专员',   'expense.view'), ('运营专员', 'expense.edit'),
+      ('产品开发专员', 'expense.view'), ('产品开发专员', 'expense.edit'),
+      ('内容达人',   'expense.view'), ('内容达人',   'expense.edit'),
+      ('广告投手',   'expense.view'), ('广告投手',   'expense.edit'),
+      ('只读观察员', 'expense.view')
     ) as v(role_name, code)
   loop
     update public.roles
@@ -2945,7 +3180,14 @@ begin
       ('内容营销部', 'brand.view'), ('内容营销部', 'brand.edit'),
       ('信息中心',   'dev.view'), ('信息中心',   'dev.edit'),
       ('运营部',     'dev.view'), ('运营部',     'dev.edit'),
-      ('财务部',     'finance.audit')
+      ('财务部',     'finance.audit'),
+      -- 费用管理：财务全权，其他部门可记账（审批仍受 finance.audit 约束）
+      ('信息中心',   'expense.view'), ('信息中心',   'expense.edit'),
+      ('财务部',     'expense.view'), ('财务部',     'expense.edit'),
+      ('运营部',     'expense.view'), ('运营部',     'expense.edit'),
+      ('广告投放部', 'expense.view'), ('广告投放部', 'expense.edit'),
+      ('内容营销部', 'expense.view'), ('内容营销部', 'expense.edit'),
+      ('人力资源部', 'expense.view'), ('人力资源部', 'expense.edit')
     ) as v(dept_name, code)
   loop
     update public.departments

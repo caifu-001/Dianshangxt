@@ -720,6 +720,80 @@ export async function seedDemoData() {
     // 旧库还没有产品开发表：跳过
   }
 
+  // 12b. 费用管理：费用单 + 明细 + 预算 + 审批流水（覆盖各状态，便于演示闭环）
+  try {
+    const [deptRows, memberRows] = await Promise.all([
+      fetchRows<{ id: string; name: string }>('departments').catch(() => [] as { id: string; name: string }[]),
+      fetchRows<{ id: string; full_name: string | null }>('team_directory').catch(() => [] as { id: string; full_name: string | null }[]),
+    ])
+    const deptId = (name: string) => deptRows.find((d) => d.name === name)?.id ?? null
+    const finDept = deptId('财务部')
+    const opsDept = deptId('运营部')
+    const adsDept = deptId('广告投放部')
+    const hrDept = deptId('人力资源部')
+    const me = memberRows.find((m) => m.id === ownerId)?.id ?? ownerId
+
+    const seedExpenses = [
+      { code: `FY${dayjs().format('YYYYMM')}-0001`, title: '11 月美国站广告充值', category: 'marketing', subcategory: '广告投放', status: 'paid', days: 2, dept: adsDept, items: [['SP 广告充值', 1, 5200], ['SB 品牌广告', 1, 1800]] },
+      { code: `FY${dayjs().format('YYYYMM')}-0002`, title: '深圳-广州供应商验厂差旅', category: 'travel', subcategory: '住宿', status: 'paid', days: 5, dept: opsDept, items: [['高铁往返', 2, 320], ['住宿 2 晚', 2, 420], ['市内交通', 1, 180]] },
+      { code: `FY${dayjs().format('YYYYMM')}-0003`, title: '竹木收纳盒 FDA 检测费', category: 'rd', subcategory: '认证检测', status: 'approved', days: 1, dept: opsDept, items: [['食品接触材料检测', 1, 3200]] },
+      { code: `FY${dayjs().format('YYYYMM')}-0004`, title: '10 月员工社保与公积金', category: 'payroll', subcategory: '社保', status: 'approved', days: 8, dept: hrDept, items: [['社保（公司部分）', 1, 18600], ['公积金', 1, 7200]] },
+      { code: `FY${dayjs().format('YYYYMM')}-0005`, title: '海外红人内容合作尾款', category: 'marketing', subcategory: '站外红人', status: 'pending', days: 0, dept: adsDept, items: [['@homedecorali 视频尾款', 1, 1500]] },
+      { code: `FY${dayjs().format('YYYYMM')}-0006`, title: '英国站 VAT 季度申报服务费', category: 'other', subcategory: '税费', status: 'pending', days: 1, dept: finDept, items: [['VAT 申报服务', 1, 2600]] },
+      { code: `FY${dayjs().format('YYYYMM')}-0007`, title: 'ERP 软件年度订阅（草稿）', category: 'office', subcategory: '软件订阅', status: 'draft', days: 0, dept: finDept, items: [['ERP 年费', 1, 1299]] },
+    ] as const
+
+    const expenseRows = await insertRows<{ id: string }>('finance_expenses', seedExpenses.map((s) => ({
+      code: s.code,
+      title: s.title,
+      category: s.category,
+      subcategory: s.subcategory,
+      department_id: s.dept,
+      owner_id: me,
+      store_id: null,
+      project_id: 'project' in s ? (s.project ?? null) : null,
+      user_id: ownerId,
+      currency: 'CNY',
+      expense_date: daysAgo(s.days),
+      status: s.status,
+      note: s.status === 'draft' ? '待补充合同编号后提交' : null,
+    })))
+
+    const itemPayload = expenseRows.flatMap((row, i) =>
+      seedExpenses[i].items.map(([item, qty, price]) => ({
+        expense_id: row.id,
+        category: seedExpenses[i].category,
+        item,
+        qty,
+        unit_price: price,
+        amount: qty * price,
+        employee_id: null,
+        user_id: ownerId,
+      })),
+    )
+    await insertRows('finance_expense_items', itemPayload)
+
+    const approvalPayload = expenseRows.flatMap((row, i) => {
+      const s = seedExpenses[i]
+      const actions: Array<{ action: string; note: string | null }> = [{ action: 'submit', note: '提交财务审核' }]
+      if (s.status === 'approved' || s.status === 'paid') actions.push({ action: 'approve', note: '金额与用途核对无误，同意' })
+      if (s.status === 'paid') actions.push({ action: 'pay', note: '已登记付款' })
+      return actions.map((a) => ({ expense_id: row.id, user_id: ownerId, action: a.action, note: a.note }))
+    })
+    await insertRows('finance_expense_approvals', approvalPayload)
+
+    const month = dayjs().format('YYYY-MM')
+    await insertRows('finance_budgets', [
+      { category: 'rd', department_id: opsDept, period: month, amount: 20000, currency: 'CNY', note: '新品检测与打样预算' },
+      { category: 'marketing', department_id: adsDept, period: month, amount: 80000, currency: 'CNY', note: '广告与红人投放预算' },
+      { category: 'payroll', department_id: hrDept, period: month, amount: 120000, currency: 'CNY', note: '工资社保公积金预算' },
+      { category: 'travel', department_id: opsDept, period: month, amount: 15000, currency: 'CNY', note: '差旅预算' },
+      { category: 'office', department_id: finDept, period: month, amount: 10000, currency: 'CNY', note: '办公行政预算' },
+    ].map((b) => ({ ...b, user_id: ownerId })))
+  } catch {
+    // 旧库还没有费用管理表：跳过
+  }
+
   // 11. 组织架构（演示用）：把当前账号归到一个部门 / 岗位 / 角色上，
   //    这样「组织架构」页不会是空的。表不存在（旧库未升级）时整体跳过。
   try {
