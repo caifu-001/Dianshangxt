@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import { Bar, BarChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import dayjs from 'dayjs'
-import { deleteRow, deleteWhere, fetchRows, insertRows, updateRow } from '../lib/db'
+import { callRpc, deleteRow, deleteWhere, fetchRows, insertRows, updateRow } from '../lib/db'
 import { useAsync } from '../hooks/useAsync'
 import { useAuth } from '../context/AuthContext'
 import { cn, downloadTextFile, fmtDate, money, num, pct, toCsv, today } from '../lib/utils'
@@ -168,7 +168,7 @@ export default function Expenses() {
       fetchRows<FinanceExpenseItem>('finance_expense_items', { order: { column: 'created_at', ascending: true } }),
       fetchRows<FinanceBudget>('finance_budgets', { order: { column: 'period', ascending: false } }),
       fetchRows<FinanceExpenseApproval>('finance_expense_approvals', { order: { column: 'created_at', ascending: false } }),
-      fetchRows<DirectoryRow>('team_directory'),
+      callRpc<DirectoryRow[]>('team_directory').catch(() => [] as DirectoryRow[]),
       fetchRows<Department>('departments'),
       fetchRows<Store>('stores'),
       fetchRows<DevProject>('dev_projects').catch(() => [] as DevProject[]),

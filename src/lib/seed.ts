@@ -1,5 +1,5 @@
 import dayjs from 'dayjs'
-import { fetchRows, insertRow, insertRows, updateRow } from './db'
+import { callRpc, fetchRows, insertRow, insertRows, updateRow } from './db'
 import { supabase } from './supabase'
 import { daysAgo } from './utils'
 import type { Platform } from './types'
@@ -724,7 +724,7 @@ export async function seedDemoData() {
   try {
     const [deptRows, memberRows] = await Promise.all([
       fetchRows<{ id: string; name: string }>('departments').catch(() => [] as { id: string; name: string }[]),
-      fetchRows<{ id: string; full_name: string | null }>('team_directory').catch(() => [] as { id: string; full_name: string | null }[]),
+      callRpc<{ id: string; full_name: string | null }[]>('team_directory').catch(() => [] as { id: string; full_name: string | null }[]),
     ])
     const deptId = (name: string) => deptRows.find((d) => d.name === name)?.id ?? null
     const finDept = deptId('财务部')
