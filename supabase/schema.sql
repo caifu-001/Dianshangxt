@@ -77,11 +77,11 @@ update public.profiles
    set role = 'super_admin',
        company_id = null,
        active_company_id = coalesce(active_company_id, '00000000-0000-0000-0000-000000000001'::uuid)
- where lower(coalesce(email, '')) = 'yinsunccess168@163.com';
+ where lower(coalesce(email, '')) = 'yinsuccess168@163.com';
 update public.profiles
    set role = 'admin'
  where role = 'super_admin'
-   and lower(coalesce(email, '')) <> 'yinsunccess168@163.com';
+   and lower(coalesce(email, '')) <> 'yinsuccess168@163.com';
 
 -- 新用户注册后自动建档
 create or replace function public.handle_new_user()
@@ -97,7 +97,7 @@ begin
   -- 多租户：只有平台超管邮箱能拿到 super_admin；其余账号一律普通人员，
   -- 且默认落进默认公司，由所属公司的管理员在账号管理页调整。
   assigned_role := case
-    when lower(coalesce(new.email, '')) = 'yinsunccess168@163.com' then 'super_admin'
+    when lower(coalesce(new.email, '')) = 'yinsuccess168@163.com' then 'super_admin'
     else 'member'
   end;
 
@@ -131,17 +131,17 @@ as $$
 begin
   -- 多租户后超管固定为指定邮箱；该邮箱未注册时不动现有超管，避免把系统锁死，
   -- 但绝不再随机把「最早注册的账号」提升成超管。
-  if exists (select 1 from public.profiles where lower(coalesce(email, '')) = 'yinsunccess168@163.com') then
+  if exists (select 1 from public.profiles where lower(coalesce(email, '')) = 'yinsuccess168@163.com') then
     update public.profiles
        set role = 'super_admin',
            company_id = null,
            active_company_id = coalesce(active_company_id, '00000000-0000-0000-0000-000000000001'::uuid)
-     where lower(coalesce(email, '')) = 'yinsunccess168@163.com';
+     where lower(coalesce(email, '')) = 'yinsuccess168@163.com';
 
     update public.profiles
        set role = 'admin'
      where role = 'super_admin'
-       and lower(coalesce(email, '')) <> 'yinsunccess168@163.com';
+       and lower(coalesce(email, '')) <> 'yinsuccess168@163.com';
   end if;
 end;
 $$;
@@ -2120,14 +2120,14 @@ begin
   end if;
 
   -- 平台超管账号受保护：其他人不能改他的角色 / 状态 / 公司归属
-  if lower(coalesce(old.email, '')) = 'yinsunccess168@163.com'
+  if lower(coalesce(old.email, '')) = 'yinsuccess168@163.com'
      and not public.is_super_admin() then
     raise exception '不能修改平台超级管理员账号';
   end if;
 
   -- 全局超管唯一：只有指定邮箱能持有 super_admin，公司内最高为普通管理员
   if new.role = 'super_admin'
-     and lower(coalesce(new.email, '')) <> 'yinsunccess168@163.com' then
+     and lower(coalesce(new.email, '')) <> 'yinsuccess168@163.com' then
     raise exception '公司内最高角色为普通管理员，不能设置超级管理员';
   end if;
 
