@@ -37,6 +37,21 @@ interface PlatformMember {
   created_at: string
 }
 
+interface CompanyRegistration {
+  id: string
+  company_name: string
+  company_code: string | null
+  note: string | null
+  applicant_id: string
+  applicant_email: string | null
+  applicant_name: string | null
+  status: 'pending' | 'approved' | 'rejected'
+  reject_reason: string | null
+  company_id: string | null
+  created_at: string
+  reviewed_at: string | null
+}
+
 const emptyForm = (): FormState => ({ name: '', code: '', note: '', status: 'active' })
 
 /** 平台超级管理员专属：创建公司、维护公司、切换当前数据视角 */
@@ -56,8 +71,17 @@ export default function Companies() {
   const [memberQuery, setMemberQuery] = useState('')
   const [moving, setMoving] = useState(false)
 
+  // 入驻审核
+  const [reviewing, setReviewing] = useState<string | null>(null)
+  const [rejecting, setRejecting] = useState<CompanyRegistration | null>(null)
+  const [rejectReason, setRejectReason] = useState('')
+
   const { data, loading, error, reload } = useAsync<Company[]>(() => callRpc<Company[]>('list_companies'), [])
   const members = useAsync<PlatformMember[]>(() => callRpc<PlatformMember[]>('platform_members'), [])
+  const registrations = useAsync<CompanyRegistration[]>(
+    () => callRpc<CompanyRegistration[]>('list_company_registrations'),
+    [],
+  )
 
   function openCreate() {
     setEditing(null)
@@ -127,6 +151,39 @@ export default function Companies() {
       push(err instanceof Error ? err.message : '移动失败', 'error')
     } finally {
       setMoving(false)
+    }
+  }
+
+  async function doApprove(r: CompanyRegistration) {
+    setReviewing(r.id)
+    try {
+      await callRpc('approve_company_registration', { p_id: r.id })
+      push(`已通过「${r.company_name}」的入驻申请，负责人已成为该公司普通管理员`)
+      reload()
+      registrations.reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '审核失败', 'error')
+    } finally {
+      setReviewing(null)
+    }
+  }
+
+  async function doReject() {
+    if (!rejecting) return
+    setReviewing(rejecting.id)
+    try {
+      await callRpc('reject_company_registration', {
+        p_id: rejecting.id,
+        p_reason: rejectReason.trim() || null,
+      })
+      push('已驳回该入驻申请')
+      setRejecting(null)
+      setRejectReason('')
+      registrations.reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '驳回失败', 'error')
+    } finally {
+      setReviewing(null)
     }
   }
 
@@ -253,6 +310,105 @@ export default function Companies() {
           </table>
         </div>
       )}
+
+      {/* 公司入驻申请审核 */}
+      <div className="card mt-4 overflow-hidden">
+        <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
+          <Users className="w-4 h-4 text-ink-400" />
+          <h3 className="text-[13.5px] font-semibold text-ink-900">公司入驻审核</h3>
+          <span className="text-[11px] text-ink-400">
+            负责人自助注册公司后在此审核，通过后自动创建公司并激活负责人账号
+          </span>
+        </div>
+        <div className="p-4">
+          {registrations.loading ? (
+            <LoadingBlock rows={3} />
+          ) : registrations.error ? (
+            <ErrorBlock message={registrations.error} onRetry={registrations.reload} />
+          ) : !registrations.data?.length ? (
+            <p className="text-[12px] text-ink-400 py-3 text-center">暂无入驻申请</p>
+          ) : (
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="bg-ink-50/80 text-left text-ink-500">
+                  <th className="px-3 py-2 font-medium">申请公司</th>
+                  <th className="px-3 py-2 font-medium">负责人</th>
+                  <th className="px-3 py-2 font-medium">申请时间</th>
+                  <th className="px-3 py-2 font-medium">状态</th>
+                  <th className="px-3 py-2 font-medium text-right">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-ink-100">
+                {registrations.data.map((r) => (
+                  <tr key={r.id} className="hover:bg-ink-50/50">
+                    <td className="px-3 py-2.5">
+                      <p className="font-medium text-ink-800">{r.company_name}</p>
+                      {(r.company_code || r.note) && (
+                        <p className="text-[11px] text-ink-400">
+                          {r.company_code ? `${r.company_code} · ` : ''}
+                          {r.note}
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <p className="text-ink-700">{r.applicant_name || '未填称呼'}</p>
+                      <p className="text-[11px] text-ink-400">{r.applicant_email}</p>
+                    </td>
+                    <td className="px-3 py-2.5 text-ink-400">
+                      {dayjs(r.created_at).format('YYYY-MM-DD HH:mm')}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span
+                        className={
+                          r.status === 'pending'
+                            ? 'text-[11px] px-2 py-0.5 rounded bg-amber-50 text-amber-700'
+                            : r.status === 'approved'
+                              ? 'text-[11px] px-2 py-0.5 rounded bg-emerald-50 text-emerald-700'
+                              : 'text-[11px] px-2 py-0.5 rounded bg-rose-50 text-rose-700'
+                        }
+                      >
+                        {r.status === 'pending' ? '待审核' : r.status === 'approved' ? '已通过' : '已驳回'}
+                      </span>
+                      {r.status === 'rejected' && r.reject_reason && (
+                        <p className="text-[11px] text-ink-400 mt-1 max-w-[180px] truncate" title={r.reject_reason}>
+                          原因：{r.reject_reason}
+                        </p>
+                      )}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {r.status === 'pending' ? (
+                        <div className="flex items-center justify-end gap-1">
+                          <button
+                            className="text-[11px] px-2 py-1 rounded-md bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-40"
+                            onClick={() => doApprove(r)}
+                            disabled={reviewing === r.id}
+                          >
+                            {reviewing === r.id ? '处理中…' : '通过'}
+                          </button>
+                          <button
+                            className="text-[11px] px-2 py-1 rounded-md text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                            onClick={() => {
+                              setRejecting(r)
+                              setRejectReason('')
+                            }}
+                            disabled={reviewing === r.id}
+                          >
+                            驳回
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-ink-400">
+                          {r.reviewed_at ? dayjs(r.reviewed_at).format('MM-DD HH:mm') : '—'}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
 
       <Modal
         open={modalOpen}
@@ -425,6 +581,30 @@ export default function Companies() {
             移动只调整账号的公司归属，不影响其业务数据的原公司隔离；成员在新公司的可见范围由所属部门与岗位角色决定。
           </p>
         </div>
+      </Modal>
+
+      <Modal
+        open={!!rejecting}
+        onClose={() => setRejecting(null)}
+        title="驳回入驻申请"
+        description={rejecting ? `${rejecting.company_name} · ${rejecting.applicant_email}` : undefined}
+        footer={
+          <>
+            <Button onClick={() => setRejecting(null)}>取消</Button>
+            <Button variant="primary" loading={reviewing === rejecting?.id} onClick={doReject}>
+              确认驳回
+            </Button>
+          </>
+        }
+      >
+        <Field label="驳回原因" hint="选填，会展示在申请记录中便于负责人了解">
+          <textarea
+            className="input min-h-[88px]"
+            value={rejectReason}
+            onChange={(e) => setRejectReason(e.target.value)}
+            placeholder="如：公司名称与已有公司重复，请更换后重新申请"
+          />
+        </Field>
       </Modal>
     </>
   )

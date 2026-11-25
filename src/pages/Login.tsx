@@ -5,6 +5,7 @@ import {
   ArrowRight,
   BarChart3,
   Boxes,
+  Building2,
   KeyRound,
   Loader2,
   Lock,
@@ -31,12 +32,14 @@ const OTP_COOLDOWN_SEC = 60
 export default function Login() {
   const { signIn, signUp, sendOtp, verifyOtp } = useAuth()
 
-  const [mode, setMode] = useState<'signin' | 'signup'>('signin')
+  const [mode, setMode] = useState<'signin' | 'signup' | 'company'>('signin')
   const [method, setMethod] = useState<'password' | 'otp'>('password')
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
+  const [companyName, setCompanyName] = useState('')
+  const [companyCode, setCompanyCode] = useState('')
 
   const [captchaCode, setCaptchaCode] = useState(() => randomCaptcha())
   const [captchaInput, setCaptchaInput] = useState('')
@@ -67,7 +70,7 @@ export default function Login() {
     setCaptchaError(null)
   }
 
-  function switchMode(next: 'signin' | 'signup') {
+  function switchMode(next: 'signin' | 'signup' | 'company') {
     setMode(next)
     setError(null)
     setInfo(null)
@@ -107,13 +110,31 @@ export default function Login() {
     setLoading(true)
     try {
       // ---- 注册 ----
-      if (mode === 'signup') {
+      if (mode === 'signup' || mode === 'company') {
         if (!fullName.trim()) throw new Error('请填写你的称呼')
         if (!pwCheck.ok) throw new Error(pwCheck.hint)
+        if (mode === 'company' && !companyName.trim()) throw new Error('请填写公司名称')
         if (!ensureCaptcha()) return
 
-        const { needsConfirm } = await signUp(email.trim(), password, fullName.trim())
-        if (needsConfirm) {
+        const { needsConfirm } = await signUp(
+          email.trim(),
+          password,
+          fullName.trim(),
+          mode === 'company'
+            ? { name: companyName.trim(), code: companyCode.trim() || undefined }
+            : undefined,
+        )
+        if (mode === 'company') {
+          setInfo(
+            needsConfirm
+              ? '入驻申请已提交。请先到邮箱点击确认链接完成验证，审核通过后即可登录工作台。'
+              : '入驻申请已提交，等待平台超级管理员审核。审核期间无法访问业务数据。',
+          )
+          setMode('signin')
+          setMethod('password')
+          setCompanyName('')
+          setCompanyCode('')
+        } else if (needsConfirm) {
           setInfo('注册成功。请到邮箱点击确认链接完成验证，然后回来登录。')
           setMode('signin')
           setMethod('password')
@@ -245,31 +266,43 @@ export default function Login() {
           </div>
 
           <h2 className="text-[22px] font-semibold text-ink-900 tracking-tight">
-            {mode === 'signin' ? '登录工作台' : '创建运营账号'}
+            {mode === 'signin' ? '登录工作台' : mode === 'signup' ? '创建运营账号' : '申请入驻公司'}
           </h2>
           <p className="mt-1 text-[13px] text-ink-500">
             {mode === 'signin'
               ? method === 'password'
                 ? '用邮箱密码登录，继续今天的运营工作'
                 : '用邮箱接收一次性验证码，无需记密码'
-              : '注册后即可建立店铺与商品档案'}
+              : mode === 'signup'
+                ? '注册后即可建立店铺与商品档案'
+                : '填写公司信息并提交，平台超级管理员审核通过后即可开通'}
           </p>
 
           <div className="mt-6 flex p-0.5 rounded-lg bg-ink-100 border border-ink-200/60">
-            {(['signin', 'signup'] as const).map((m) => (
+            {([
+              { key: 'signin', label: '登录' },
+              { key: 'signup', label: '注册' },
+              { key: 'company', label: '注册公司' },
+            ] as const).map((m) => (
               <button
-                key={m}
+                key={m.key}
                 type="button"
-                onClick={() => switchMode(m)}
+                onClick={() => switchMode(m.key)}
                 className={cn(
                   'flex-1 h-8 rounded-md text-[13px] font-medium transition-all',
-                  mode === m ? 'bg-white text-ink-900 shadow-sm' : 'text-ink-500 hover:text-ink-700',
+                  mode === m.key ? 'bg-white text-ink-900 shadow-sm' : 'text-ink-500 hover:text-ink-700',
                 )}
               >
-                {m === 'signin' ? '登录' : '注册'}
+                {m.label}
               </button>
             ))}
           </div>
+
+          {mode === 'company' && (
+            <div className="mt-3 rounded-lg bg-amber-50 border border-amber-200/70 px-3 py-2 text-[11.5px] text-amber-800 leading-relaxed">
+              你会成为该公司的<strong>普通管理员</strong>，可自行开通同事账号。提交后需平台超管审核，审核前无法访问业务数据。
+            </div>
+          )}
 
           {mode === 'signin' && (
             <div className="mt-3 flex items-center justify-between">
@@ -288,9 +321,9 @@ export default function Login() {
           )}
 
           <form onSubmit={handleSubmit} className="mt-4 space-y-3.5">
-            {mode === 'signup' && (
+            {(mode === 'signup' || mode === 'company') && (
               <div>
-                <label className="label">你的称呼</label>
+                <label className="label">{mode === 'company' ? '负责人称呼' : '你的称呼'}</label>
                 <input
                   className="input"
                   value={fullName}
@@ -299,6 +332,33 @@ export default function Login() {
                   autoComplete="name"
                 />
               </div>
+            )}
+
+            {mode === 'company' && (
+              <>
+                <div>
+                  <label className="label">公司名称</label>
+                  <div className="relative">
+                    <Building2 className="w-3.5 h-3.5 text-ink-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      className="input pl-9"
+                      value={companyName}
+                      onChange={(e) => setCompanyName(e.target.value)}
+                      placeholder="如：某某科技有限公司"
+                      autoComplete="organization"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="label">公司编码 <span className="text-ink-400">（选填）</span></label>
+                  <input
+                    className="input"
+                    value={companyCode}
+                    onChange={(e) => setCompanyCode(e.target.value)}
+                    placeholder="如：ACME，便于平台识别"
+                  />
+                </div>
+              </>
             )}
 
             <div>
@@ -423,7 +483,7 @@ export default function Login() {
               disabled={loading || lockLeft > 0}
             >
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
-              {mode === 'signup' ? '注册并登录' : method === 'otp' ? (otpSent ? '验证并登录' : '发送验证码') : '登录'}
+              {mode === 'signup' ? '注册并登录' : mode === 'company' ? '提交入驻申请' : method === 'otp' ? (otpSent ? '验证并登录' : '发送验证码') : '登录'}
               {!loading && <ArrowRight className="w-4 h-4 ml-0.5" />}
             </button>
           </form>
@@ -437,7 +497,7 @@ export default function Login() {
           )}
 
           <p className="mt-5 text-[11px] leading-relaxed text-ink-400">
-            密码登录连续失败 {MAX_FAILS} 次将锁定 15 分钟；验证码登录需先切换到「注册」创建账号。
+            密码登录连续失败 {MAX_FAILS} 次将锁定 15 分钟；验证码登录需先切换到「注册」创建账号。公司负责人请用「注册公司」提交入驻申请。
           </p>
         </div>
       </div>

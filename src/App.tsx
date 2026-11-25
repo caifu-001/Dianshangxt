@@ -1,6 +1,6 @@
 import { BrowserRouter, Link, Navigate, Route, Routes } from 'react-router-dom'
 import type { ReactNode } from 'react'
-import { Lock, LogOut, Loader2, ShieldOff } from 'lucide-react'
+import { Clock3, Lock, LogOut, Loader2, ShieldOff } from 'lucide-react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ToastProvider, Button } from './components/ui'
 import type { PermissionCode } from './lib/permissions'
@@ -92,20 +92,27 @@ function RequirePermission({
   )
 }
 
-function AccountBlocked({ kind, onSignOut }: { kind: 'disabled' | 'missing'; onSignOut: () => void }) {
+function AccountBlocked({ kind, onSignOut }: { kind: 'disabled' | 'pending' | 'missing'; onSignOut: () => void }) {
+  const isPending = kind === 'pending'
   return (
     <div className="min-h-screen flex items-center justify-center bg-ink-50 px-5">
       <div className="w-full max-w-[420px] card p-8 text-center">
-        <div className="w-12 h-12 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
-          <ShieldOff className="w-6 h-6" />
+        <div
+          className={`w-12 h-12 rounded-xl flex items-center justify-center mx-auto ${
+            isPending ? 'bg-amber-50 text-amber-600' : 'bg-rose-50 text-rose-600'
+          }`}
+        >
+          {isPending ? <Clock3 className="w-6 h-6" /> : <ShieldOff className="w-6 h-6" />}
         </div>
         <h1 className="mt-4 text-[17px] font-semibold text-ink-900">
-          {kind === 'disabled' ? '账号已被禁用' : '账号档案不存在'}
+          {isPending ? '公司入驻申请待审核' : kind === 'disabled' ? '账号已被禁用' : '账号档案不存在'}
         </h1>
         <p className="mt-2 text-[13px] leading-relaxed text-ink-500">
-          {kind === 'disabled'
-            ? '管理员已停用你的账号，业务数据暂时不可访问。需要恢复请联系团队的超级管理员。'
-            : '登录凭据有效，但系统中查不到对应的成员档案。请联系管理员在「人员与账号」中恢复你的账号。'}
+          {isPending
+            ? '你提交的公司入驻申请正在等待平台超级管理员审核。审核通过后账号将自动激活，届时即可进入工作台。期间无法访问业务数据。'
+            : kind === 'disabled'
+              ? '管理员已停用你的账号，业务数据暂时不可访问。需要恢复请联系团队的超级管理员。'
+              : '登录凭据有效，但系统中查不到对应的成员档案。请联系管理员在「人员与账号」中恢复你的账号。'}
         </p>
         <Button className="mt-5" onClick={onSignOut} icon={<LogOut className="w-3.5 h-3.5" />}>
           退出登录

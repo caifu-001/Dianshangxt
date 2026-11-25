@@ -36,9 +36,10 @@ alter table public.profiles drop constraint if exists profiles_role_check;
 alter table public.profiles add  constraint profiles_role_check
   check (role in ('super_admin', 'admin', 'member'));
 
+-- pending：自助注册公司的负责人，等待平台超管审核；审核期间不算活跃用户
 alter table public.profiles drop constraint if exists profiles_status_check;
 alter table public.profiles add  constraint profiles_status_check
-  check (status in ('active', 'disabled'));
+  check (status in ('active', 'disabled', 'pending'));
 
 create index if not exists idx_profiles_role   on public.profiles(role);
 create index if not exists idx_profiles_status on public.profiles(status);
@@ -93,6 +94,8 @@ as $$
 declare
   existing_count int;
   assigned_role  text;
+  v_company_name text;
+  v_is_company   boolean;
 begin
   -- 多租户：只有平台超管邮箱能拿到 super_admin；其余账号一律普通人员，
   -- 且默认落进默认公司，由所属公司的管理员在账号管理页调整。
@@ -101,17 +104,33 @@ begin
     else 'member'
   end;
 
+  -- 自助注册公司：metadata 里带 register_company=true 与 company_name 时，
+  -- 账号先落 pending（不可访问业务），并生成一条入驻申请等超管审核。
+  -- 注意：这里绝不读取 metadata 里的 role，防止伪造提权。
+  v_company_name := nullif(btrim(coalesce(new.raw_user_meta_data->>'company_name', '')), '');
+  v_is_company := coalesce(new.raw_user_meta_data->>'register_company', '') = 'true'
+                  and v_company_name is not null
+                  and assigned_role <> 'super_admin';
+
   insert into public.profiles (id, email, full_name, role, status, company_id, active_company_id)
   values (
     new.id,
     new.email,
     coalesce(new.raw_user_meta_data->>'full_name', split_part(coalesce(new.email, ''), '@', 1)),
     assigned_role,
-    'active',
+    case when v_is_company then 'pending' else 'active' end,
     case when assigned_role = 'super_admin' then null else '00000000-0000-0000-0000-000000000001'::uuid end,
     case when assigned_role = 'super_admin' then '00000000-0000-0000-0000-000000000001'::uuid else null end
   )
   on conflict (id) do nothing;
+
+  if v_is_company then
+    perform public.create_company_registration(
+      new.id, v_company_name,
+      nullif(btrim(coalesce(new.raw_user_meta_data->>'company_code', '')), ''),
+      nullif(btrim(coalesce(new.raw_user_meta_data->>'company_note', '')), '')
+    );
+  end if;
   return new;
 end;
 $$;
@@ -1412,6 +1431,136 @@ begin
   values (trim(p_name), nullif(trim(coalesce(p_code, '')), ''), p_note)
   returning id into v_id;
   return v_id;
+end;
+$$;
+
+-- -------------------------------------------------------------
+--  公司自助入驻：负责人自助注册账号并申请开公司，平台超管审核。
+--  审核期间账号 status=pending，is_active_user() 为 false，业务数据全被 RLS 拦住。
+-- -------------------------------------------------------------
+create table if not exists public.company_registrations (
+  id            uuid primary key default gen_random_uuid(),
+  company_name  text not null,
+  company_code  text,
+  note          text,
+  applicant_id  uuid not null references auth.users(id) on delete cascade,
+  applicant_email text,
+  applicant_name  text,
+  status        text not null default 'pending' check (status in ('pending','approved','rejected')),
+  reviewed_by   uuid references auth.users(id) on delete set null,
+  reviewed_at   timestamptz,
+  reject_reason text,
+  company_id    uuid references public.companies(id) on delete set null,
+  created_at    timestamptz not null default now()
+);
+create index if not exists idx_company_reg_status on public.company_registrations(status, created_at desc);
+alter table public.company_registrations enable row level security;
+
+-- 申请人可看自己的申请；平台超管看全部（通过专用函数，普通账号无法查看他人申请）
+drop policy if exists "company_reg_select_own" on public.company_registrations;
+create policy "company_reg_select_own" on public.company_registrations
+  for select to authenticated
+  using (applicant_id = auth.uid() or public.is_super_admin());
+
+-- 负责人提交入驻申请：由注册触发器调用，不接受前端直接写角色
+create or replace function public.create_company_registration(
+  p_applicant uuid,
+  p_company_name text,
+  p_company_code text default null,
+  p_note text default null
+)
+returns uuid
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_id uuid;
+  v_email text;
+  v_name text;
+begin
+  if p_applicant is null or p_company_name is null or length(trim(p_company_name)) = 0 then
+    raise exception '公司名称不能为空';
+  end if;
+  select email into v_email from auth.users where id = p_applicant;
+  select full_name into v_name from public.profiles where id = p_applicant;
+  insert into public.company_registrations
+    (company_name, company_code, note, applicant_id, applicant_email, applicant_name, status)
+  values
+    (trim(p_company_name), nullif(trim(coalesce(p_company_code, '')), ''), p_note,
+     p_applicant, v_email, v_name, 'pending')
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+-- 平台超管：列出全部入驻申请（含申请人信息）
+create or replace function public.list_company_registrations()
+returns table (
+  id uuid, company_name text, company_code text, note text,
+  applicant_id uuid, applicant_email text, applicant_name text,
+  status text, reject_reason text, company_id uuid, created_at timestamptz,
+  reviewed_at timestamptz
+)
+language sql stable security definer set search_path = public
+as $$
+  select r.id, r.company_name, r.company_code, r.note, r.applicant_id,
+         r.applicant_email, r.applicant_name, r.status, r.reject_reason,
+         r.company_id, r.created_at, r.reviewed_at
+    from public.company_registrations r
+   where public.is_super_admin()
+   order by r.created_at desc;
+$$;
+
+-- 平台超管：审核通过创建公司并把负责人激活为该公司普通管理员
+create or replace function public.approve_company_registration(p_id uuid)
+returns uuid
+language plpgsql security definer set search_path = public
+as $$
+declare
+  r public.company_registrations%rowtype;
+  v_company uuid;
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以审核公司入驻';
+  end if;
+  select * into r from public.company_registrations where id = p_id for update;
+  if not found then raise exception '申请不存在'; end if;
+  if r.status <> 'pending' then raise exception '该申请已处理'; end if;
+
+  insert into public.companies (name, code, note)
+  values (r.company_name, r.company_code, r.note)
+  returning id into v_company;
+
+  -- 负责人成为该公司普通管理员并激活
+  update public.profiles
+     set role = 'admin', status = 'active', company_id = v_company, active_company_id = null
+   where id = r.applicant_id;
+
+  update public.company_registrations
+     set status = 'approved', reviewed_by = auth.uid(), reviewed_at = now(), company_id = v_company
+   where id = p_id;
+  return v_company;
+end;
+$$;
+
+-- 平台超管：驳回入驻申请
+create or replace function public.reject_company_registration(p_id uuid, p_reason text default null)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  r public.company_registrations%rowtype;
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以审核公司入驻';
+  end if;
+  select * into r from public.company_registrations where id = p_id for update;
+  if not found then raise exception '申请不存在'; end if;
+  if r.status <> 'pending' then raise exception '该申请已处理'; end if;
+
+  update public.company_registrations
+     set status = 'rejected', reviewed_by = auth.uid(), reviewed_at = now(), reject_reason = p_reason
+   where id = p_id;
+  -- 驳回后账号保持 pending（无法登录业务），由超管决定是否删除或另行处理
 end;
 $$;
 
@@ -3504,6 +3653,11 @@ grant execute on function public.switch_company(uuid) to authenticated;
 grant execute on function public.assign_member_company(uuid, uuid) to authenticated;
 grant execute on function public.platform_members() to authenticated;
 grant execute on function public.platform_move_members(uuid[], uuid) to authenticated;
+-- 公司自助入驻：提交函数由注册触发器内部调用，前端只需列表 / 审核
+grant execute on function public.create_company_registration(uuid, text, text, text) to authenticated;
+grant execute on function public.list_company_registrations() to authenticated;
+grant execute on function public.approve_company_registration(uuid) to authenticated;
+grant execute on function public.reject_company_registration(uuid, text) to authenticated;
 
 -- 业务链路函数：函数内部各自校验权限，不能靠 grant 兜底
 grant execute on function public.sku_avg_cost(text)                          to authenticated;

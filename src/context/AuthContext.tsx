@@ -37,11 +37,16 @@ interface AuthContextValue {
   deptPermissions: PermissionCode[]
   /** 管理员代建的账号首次登录时要求先改掉初始密码 */
   mustChangePassword: boolean
-  /** 账号被禁用或档案被移除时非空，用于阻断进入工作台 */
-  blocked: 'disabled' | 'missing' | null
+  /** 账号被禁用 / 待审核 / 档案被移除时非空，用于阻断进入工作台 */
+  blocked: 'disabled' | 'pending' | 'missing' | null
   recheckSchema: () => Promise<boolean>
   signIn: (email: string, password: string) => Promise<void>
-  signUp: (email: string, password: string, fullName: string) => Promise<{ needsConfirm: boolean }>
+  signUp: (
+    email: string,
+    password: string,
+    fullName: string,
+    company?: { name: string; code?: string; note?: string },
+  ) => Promise<{ needsConfirm: boolean }>
   /** 发送邮箱验证码（只对已注册账号生效，避免任意人用邮箱创建账号） */
   sendOtp: (email: string) => Promise<void>
   /** 校验邮箱验证码，通过后直接建立会话 */
@@ -60,7 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [schemaReady, setSchemaReady] = useState(true)
   const [schemaMessage, setSchemaMessage] = useState<string | null>(null)
-  const [blocked, setBlocked] = useState<'disabled' | 'missing' | null>(null)
+  const [blocked, setBlocked] = useState<'disabled' | 'pending' | 'missing' | null>(null)
   const [roles, setRoles] = useState<RoleDef[]>([])
   const [deptPermissions, setDeptPermissions] = useState<PermissionCode[]>([])
 
@@ -94,9 +99,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const rows = await fetchRows<Profile>('profiles', { filters: [['id', 'eq', userId]], limit: 1 })
       const next = rows[0] ?? null
       setProfile(next)
-      // 被管理员禁用、或档案已被移除的账号，直接挡在工作台之外
+      // 被管理员禁用、待审核（自助注册公司）、或档案已被移除的账号，直接挡在工作台之外
       if (!next) setBlocked('missing')
       else if (next.status === 'disabled') setBlocked('disabled')
+      else if (next.status === 'pending') setBlocked('pending')
       else setBlocked(null)
       await loadDeptScope(next?.department_id)
     } catch {
@@ -165,11 +171,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const signUp = useCallback(async (email: string, password: string, fullName: string) => {
+  const signUp = useCallback(async (
+    email: string,
+    password: string,
+    fullName: string,
+    company?: { name: string; code?: string; note?: string },
+  ) => {
+    const meta: Record<string, unknown> = { full_name: fullName }
+    // 公司名 / 编码 / 备注交给注册触发器生成待审核申请；绝不传 role，防伪造提权
+    if (company) {
+      meta.register_company = 'true'
+      meta.company_name = company.name
+      meta.company_code = company.code ?? ''
+      meta.company_note = company.note ?? ''
+    }
     const { data, error } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { full_name: fullName } },
+      options: { data: meta },
     })
     if (error) throw new Error(translateAuthError(error.message))
     return { needsConfirm: !data.session }
