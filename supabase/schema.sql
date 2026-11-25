@@ -1594,6 +1594,198 @@ begin
 end;
 $$;
 
+-- -------------------------------------------------------------
+-- 演示数据清理（仅平台超管）
+-- 识别依据与 src/lib/seed.ts 的固定特征一致：宁可漏删，绝不误删真实数据。
+--  · 店铺：seller_id 属于 seed 的三个固定值
+--  · 商品：SKU 前缀 AH- / LB- / GL-
+--  · 有 store_id 的业务表：归属上述演示店铺
+--  · 无店铺归属的模块：seed 里写死的档案名 / 编号 / 备注
+-- 所有删除都叠加 company_id = 当前管理视角公司，超管切到哪家就只清哪家。
+-- -------------------------------------------------------------
+create or replace function public.demo_store_ids()
+returns uuid[]
+language sql stable security definer set search_path = public
+as $$
+  select coalesce(array_agg(id), '{}'::uuid[])
+    from public.stores
+   where company_id = public.current_company_id()
+     and seller_id in ('A2X9HOME01', 'B1LUMEU02', 'GLOWLAB-US');
+$$;
+
+create or replace function public.demo_data_stats()
+returns table (module text, table_name text, row_count bigint)
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_company uuid := public.current_company_id();
+  v_stores  uuid[] := public.demo_store_ids();
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以查看演示数据统计';
+  end if;
+
+  return query select * from (values
+    ('店铺',       'stores',              (select count(*)::bigint from public.stores              where company_id = v_company and id = any(v_stores))),
+    ('商品',       'products',            (select count(*)::bigint from public.products            where company_id = v_company and (sku like 'AH-%' or sku like 'LB-%' or sku like 'GL-%'))),
+    ('订单',       'orders',              (select count(*)::bigint from public.orders              where company_id = v_company and store_id = any(v_stores))),
+    ('库存',       'inventory',           (select count(*)::bigint from public.inventory           where company_id = v_company and store_id = any(v_stores))),
+    ('广告',       'campaigns',           (select count(*)::bigint from public.campaigns           where company_id = v_company and store_id = any(v_stores))),
+    ('达人',       'creators',            (select count(*)::bigint from public.creators            where company_id = v_company and store_id = any(v_stores))),
+    ('任务',       'tasks',               (select count(*)::bigint from public.tasks               where company_id = v_company and store_id = any(v_stores))),
+    ('费用',       'expenses',            (select count(*)::bigint from public.expenses            where company_id = v_company and store_id = any(v_stores))),
+    ('竞品',       'competitors',         (select count(*)::bigint from public.competitors         where company_id = v_company and store_id = any(v_stores))),
+    ('竞品快照',   'competitor_snapshots',(select count(*)::bigint from public.competitor_snapshots where company_id = v_company and competitor_id in (select id from public.competitors where company_id = v_company and store_id = any(v_stores)))),
+    ('供应商',     'suppliers',           (select count(*)::bigint from public.suppliers           where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸'))),
+    ('产品开发',   'dev_projects',        (select count(*)::bigint from public.dev_projects        where company_id = v_company and name in ('竹木折叠收纳盒（欧美站）','便携陶瓷咖啡杯套装','真丝发圈礼盒'))),
+    ('财务费用',   'finance_expenses',    (select count(*)::bigint from public.finance_expenses    where company_id = v_company and title in ('11 月美国站广告充值','深圳-广州供应商验厂差旅','竹木收纳盒 FDA 检测费','10 月员工社保与公积金','海外红人内容合作尾款','英国站 VAT 季度申报服务费','ERP 软件年度订阅（草稿）'))),
+    ('品牌社媒',   'brand_social_accounts',(select count(*)::bigint from public.brand_social_accounts where company_id = v_company and account_name in ('HomyLife Official','homylife_home','homylife.us','HomyLife Board'))),
+    ('站外红人',   'brand_influencers',   (select count(*)::bigint from public.brand_influencers   where company_id = v_company and handle in ('@emilyhome','@sofialives','@mikeunboxes','@tianyuanxm'))),
+    ('公关联系人', 'brand_pr_contacts',   (select count(*)::bigint from public.brand_pr_contacts   where company_id = v_company and media_name in ('Home Living Weekly','The Pretty House Blog','Reddit r/HomeDecor'))),
+    ('品牌指标',   'brand_metrics',       (select count(*)::bigint from public.brand_metrics       where company_id = v_company and note = '自动演示数据'))
+  ) as t(module, table_name, row_count)
+  where row_count > 0;
+end;
+$$;
+
+create or replace function public.purge_demo_data(p_confirm text default null)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_company uuid := public.current_company_id();
+  v_stores  uuid[] := public.demo_store_ids();
+  v_result  jsonb := '{}'::jsonb;
+  v_n       bigint;
+begin
+  if not public.is_super_admin() then
+    raise exception '只有平台超级管理员可以清理演示数据';
+  end if;
+  if p_confirm is distinct from 'PURGE DEMO' then
+    raise exception '清理演示数据需要显式确认';
+  end if;
+
+  -- 子表先、父表后，避免外键冲突；每一步都叠加 company_id 隔离。
+  delete from public.competitor_snapshots where company_id = v_company
+    and competitor_id in (select id from public.competitors where company_id = v_company and store_id = any(v_stores));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('competitor_snapshots', v_n);
+
+  delete from public.competitors where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('competitors', v_n);
+
+  delete from public.orders where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('orders', v_n);
+
+  delete from public.inventory where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('inventory', v_n);
+
+  delete from public.campaigns where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('campaigns', v_n);
+
+  delete from public.creators where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('creators', v_n);
+
+  delete from public.tasks where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('tasks', v_n);
+
+  delete from public.expenses where company_id = v_company and store_id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('expenses', v_n);
+
+  -- 采购：先流水与明细，再主单与供应商档案
+  delete from public.purchase_items where company_id = v_company
+    and po_id in (select id from public.purchase_orders where company_id = v_company
+                  and (store_id = any(v_stores) or supplier_id in (select id from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸'))));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('purchase_items', v_n);
+
+  delete from public.purchase_approvals where company_id = v_company
+    and po_id in (select id from public.purchase_orders where company_id = v_company
+                  and (store_id = any(v_stores) or supplier_id in (select id from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸'))));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('purchase_approvals', v_n);
+
+  delete from public.purchase_payments where company_id = v_company
+    and po_id in (select id from public.purchase_orders where company_id = v_company
+                  and (store_id = any(v_stores) or supplier_id in (select id from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸'))));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('purchase_payments', v_n);
+
+  delete from public.purchase_orders where company_id = v_company
+    and (store_id = any(v_stores) or supplier_id in (select id from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸')));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('purchase_orders', v_n);
+
+  delete from public.supplier_contacts where company_id = v_company
+    and supplier_id in (select id from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸'));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('supplier_contacts', v_n);
+
+  delete from public.supplier_products where company_id = v_company
+    and supplier_id in (select id from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸'));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('supplier_products', v_n);
+
+  delete from public.suppliers where company_id = v_company and name in ('东莞恒美家居制品厂','义乌市雅陶瓷业有限公司','广州妆源生物科技','杭州丝语丝绸');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('suppliers', v_n);
+
+  -- 履约：调拨单与库存流水（seed 的备注以「演示」开头，真实单据不会这样写）
+  delete from public.stock_movements where company_id = v_company and note like '演示%';
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('stock_movements', v_n);
+
+  delete from public.stock_transfers where company_id = v_company and note like '演示%';
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('stock_transfers', v_n);
+
+  -- 产品开发：按 seed 固定的三个项目名识别（真实项目也用 DEV- 编号，不能用前缀判断）
+  delete from public.dev_milestones where company_id = v_company
+    and project_id in (select id from public.dev_projects where company_id = v_company and name in ('竹木折叠收纳盒（欧美站）','便携陶瓷咖啡杯套装','真丝发圈礼盒'));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('dev_milestones', v_n);
+
+  delete from public.dev_costs where company_id = v_company
+    and project_id in (select id from public.dev_projects where company_id = v_company and name in ('竹木折叠收纳盒（欧美站）','便携陶瓷咖啡杯套装','真丝发圈礼盒'));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('dev_costs', v_n);
+
+  delete from public.dev_projects where company_id = v_company and name in ('竹木折叠收纳盒（欧美站）','便携陶瓷咖啡杯套装','真丝发圈礼盒');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('dev_projects', v_n);
+
+  -- 财务费用：按 seed 固定的七个标题识别（真实费用单也用 FY 编号，不能用前缀判断）
+  delete from public.finance_expense_items where company_id = v_company
+    and expense_id in (select id from public.finance_expenses where company_id = v_company and title in ('11 月美国站广告充值','深圳-广州供应商验厂差旅','竹木收纳盒 FDA 检测费','10 月员工社保与公积金','海外红人内容合作尾款','英国站 VAT 季度申报服务费','ERP 软件年度订阅（草稿）'));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('finance_expense_items', v_n);
+
+  delete from public.finance_expense_approvals where company_id = v_company
+    and expense_id in (select id from public.finance_expenses where company_id = v_company and title in ('11 月美国站广告充值','深圳-广州供应商验厂差旅','竹木收纳盒 FDA 检测费','10 月员工社保与公积金','海外红人内容合作尾款','英国站 VAT 季度申报服务费','ERP 软件年度订阅（草稿）'));
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('finance_expense_approvals', v_n);
+
+  delete from public.finance_expenses where company_id = v_company and title in ('11 月美国站广告充值','深圳-广州供应商验厂差旅','竹木收纳盒 FDA 检测费','10 月员工社保与公积金','海外红人内容合作尾款','英国站 VAT 季度申报服务费','ERP 软件年度订阅（草稿）');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('finance_expenses', v_n);
+
+  delete from public.finance_budgets where company_id = v_company and note in ('新品检测与打样预算','广告与红人投放预算','工资社保公积金预算','差旅预算','办公行政预算');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('finance_budgets', v_n);
+
+  -- 站外品牌营销
+  delete from public.brand_social_accounts where company_id = v_company and account_name in ('HomyLife Official','homylife_home','homylife.us','HomyLife Board');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('brand_social_accounts', v_n);
+
+  delete from public.brand_influencers where company_id = v_company and handle in ('@emilyhome','@sofialives','@mikeunboxes','@tianyuanxm');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('brand_influencers', v_n);
+
+  delete from public.brand_pr_contacts where company_id = v_company and media_name in ('Home Living Weekly','The Pretty House Blog','Reddit r/HomeDecor');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('brand_pr_contacts', v_n);
+
+  delete from public.brand_metrics where company_id = v_company and note = '自动演示数据';
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('brand_metrics', v_n);
+
+  -- 最后删父表：商品与店铺（子表已通过外键级联或上面的显式删除处理）
+  delete from public.products where company_id = v_company and (sku like 'AH-%' or sku like 'LB-%' or sku like 'GL-%');
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('products', v_n);
+
+  delete from public.stores where company_id = v_company and id = any(v_stores);
+  get diagnostics v_n = row_count; v_result := v_result || jsonb_build_object('stores', v_n);
+
+  -- 留痕：清理本身记入系统日志
+  perform public.record_system_event(
+    'system', 'demo_data_purged',
+    '清理演示数据，共删除 ' || (select coalesce(sum(value::bigint), 0) from jsonb_each_text(v_result)) || ' 条',
+    v_result, 'demo_data', null, 'warning');
+
+  return v_result;
+end;
+$$;
+
 -- 系统角色 / 状态 / 公司归属变化时自动留痕，前端改代码也绕不过
 create or replace function public.log_profile_security_event()
 returns trigger
@@ -3925,6 +4117,8 @@ revoke all on function public.record_system_event(text, text, text, jsonb, text,
 grant execute on function public.list_system_logs(integer, text, text, text, uuid) to authenticated;
 grant execute on function public.system_log_stats() to authenticated;
 grant execute on function public.clean_system_logs(integer, text) to authenticated;
+grant execute on function public.demo_data_stats() to authenticated;
+grant execute on function public.purge_demo_data(text) to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
 grant execute on function public.offboard_member(uuid, uuid, text) to authenticated;

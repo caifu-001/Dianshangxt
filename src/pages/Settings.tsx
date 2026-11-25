@@ -15,10 +15,11 @@ import {
   Sparkles,
   Trash2,
   User,
+  Eraser,
 } from 'lucide-react'
 import schemaSql from '../../supabase/schema.sql?raw'
 import { useAuth } from '../context/AuthContext'
-import { deleteAllRows, fetchRows, updateRow } from '../lib/db'
+import { callRpc, deleteAllRows, fetchRows, updateRow } from '../lib/db'
 import { PROJECT_REF, SQL_EDITOR_URL, SUPABASE_URL } from '../lib/supabase'
 import { seedDemoData } from '../lib/seed'
 import {
@@ -33,10 +34,16 @@ import {
   resolveRates,
   type FxMeta,
 } from '../lib/fx'
-import { Badge, Button, ConfirmDialog, Field, PageHeader, useToast } from '../components/ui'
+import { Badge, Button, ConfirmDialog, Field, Modal, PageHeader, useToast } from '../components/ui'
 import { PASSWORD_TONE_CLASS, checkPassword } from '../lib/password'
 import { cn, downloadTextFile, fmtDateTime } from '../lib/utils'
 import type { Profile } from '../lib/types'
+
+interface DemoStat {
+  module: string
+  table_name: string
+  row_count: number
+}
 
 // 清空顺序按外键依赖排：子表在前、主表在后（级联删除也会兜底）
 const CLEAR_ORDER = [
@@ -97,6 +104,12 @@ export default function Settings() {
   const [clearOpen, setClearOpen] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [counts, setCounts] = useState<Record<string, number>>({})
+  // 演示数据清理（仅超管）
+  const [demoOpen, setDemoOpen] = useState(false)
+  const [demoStats, setDemoStats] = useState<DemoStat[]>([])
+  const [demoLoading, setDemoLoading] = useState(false)
+  const [demoPurging, setDemoPurging] = useState(false)
+  const [demoConfirm, setDemoConfirm] = useState('')
   const [curPw, setCurPw] = useState('')
   const [newPw, setNewPw] = useState('')
   const [confirmPw, setConfirmPw] = useState('')
@@ -300,6 +313,36 @@ export default function Settings() {
       push(err instanceof Error ? err.message : '生成失败', 'error')
     } finally {
       setSeeding(false)
+    }
+  }
+
+  async function openDemoPurge() {
+    setDemoConfirm('')
+    setDemoOpen(true)
+    setDemoLoading(true)
+    try {
+      setDemoStats(await callRpc<DemoStat[]>('demo_data_stats'))
+    } catch (err) {
+      push(err instanceof Error ? err.message : '读取统计失败', 'error')
+    } finally {
+      setDemoLoading(false)
+    }
+  }
+
+  async function handlePurgeDemo() {
+    if (demoConfirm !== 'PURGE DEMO') return
+    setDemoPurging(true)
+    try {
+      const result = await callRpc<Record<string, number>>('purge_demo_data', { p_confirm: 'PURGE DEMO' })
+      const total = Object.values(result ?? {}).reduce((a, b) => a + Number(b || 0), 0)
+      push(`已清理演示数据，共删除 ${total} 条`)
+      setDemoOpen(false)
+      setDemoStats([])
+      setDemoConfirm('')
+    } catch (err) {
+      push(err instanceof Error ? err.message : '清理失败', 'error')
+    } finally {
+      setDemoPurging(false)
     }
   }
 
@@ -675,6 +718,20 @@ export default function Settings() {
           {isSuperAdmin && (
             <div className="p-4 flex flex-wrap items-center gap-3">
               <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium text-ink-800">清理演示数据</p>
+                <p className="mt-0.5 text-[11.5px] text-ink-500 leading-relaxed">
+                  仅删除「生成演示数据」产生的记录，按固定店铺 / SKU / 编号特征识别，不影响真实录入的数据。按当前管理视角公司清理。
+                </p>
+              </div>
+              <Button size="sm" variant="danger" onClick={openDemoPurge} icon={<Eraser className="w-3.5 h-3.5" />}>
+                清理
+              </Button>
+            </div>
+          )}
+
+          {isSuperAdmin && (
+            <div className="p-4 flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium text-ink-800">导出初始化脚本</p>
                 <p className="mt-0.5 text-[11.5px] text-ink-500 leading-relaxed">
                   下载 schema.sql，可在新项目中复用同一套表结构。
@@ -733,6 +790,63 @@ export default function Settings() {
         confirmText="确认清空"
         message="将删除当前账号下所有店铺、商品、订单、库存、广告、达人、任务和费用记录，且无法恢复。建议先导出订单报表备份。"
       />
+
+      <Modal
+        open={demoOpen}
+        onClose={() => setDemoOpen(false)}
+        title="清理演示数据"
+        width="max-w-lg"
+        footer={
+          <div className="flex justify-end gap-2">
+            <Button size="sm" onClick={() => setDemoOpen(false)}>取消</Button>
+            <Button
+              size="sm"
+              variant="danger"
+              loading={demoPurging}
+              disabled={demoConfirm !== 'PURGE DEMO'}
+              onClick={handlePurgeDemo}
+            >
+              确认清理
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-[12px] text-ink-500 leading-relaxed">
+          仅清理「生成演示数据」产生的记录：按演示店铺的 Seller ID、SKU 前缀（AH-/LB-/GL-）、固定供应商与档案编号识别，<b className="text-ink-700">不会删除真实录入的数据</b>。当前管理视角公司以外的记录不受影响。此操作不可恢复。
+        </p>
+        <div className="mt-3 rounded-lg border border-ink-100 bg-ink-50/50 max-h-48 overflow-auto">
+          {demoLoading ? (
+            <p className="p-3 text-[12px] text-ink-400">正在统计…</p>
+          ) : demoStats.length === 0 ? (
+            <p className="p-3 text-[12px] text-ink-500">当前公司视角下未检测到演示数据。</p>
+          ) : (
+            <div className="divide-y divide-ink-100">
+              {demoStats.map((s) => (
+                <div key={s.table_name} className="flex items-center justify-between px-3 py-1.5 text-[12px]">
+                  <span className="text-ink-600">{s.module}</span>
+                  <span className="tabular-nums font-medium text-ink-800">{s.row_count} 条</span>
+                </div>
+              ))}
+              <div className="flex items-center justify-between px-3 py-2 text-[12px] font-semibold bg-white">
+                <span className="text-ink-800">合计</span>
+                <span className="tabular-nums text-rose-600">
+                  {demoStats.reduce((a, s) => a + Number(s.row_count || 0), 0)} 条
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="mt-4">
+          <Field label="请输入 PURGE DEMO 以确认">
+            <input
+              value={demoConfirm}
+              onChange={(e) => setDemoConfirm(e.target.value)}
+              placeholder="PURGE DEMO"
+              className="input"
+            />
+          </Field>
+        </div>
+      </Modal>
     </div>
   )
 }
