@@ -391,6 +391,24 @@ export interface SupplierProduct {
   updated_at: string
 }
 
+/** 供应商联系人：一家供应商可维护多个联系人与多种联系方式 */
+export interface SupplierContact {
+  id: string
+  user_id: string
+  supplier_id: string
+  name: string
+  title: string | null
+  phone: string | null
+  mobile: string | null
+  email: string | null
+  /** 微信 / WhatsApp / Telegram 等即时通讯 */
+  im: string | null
+  is_primary: boolean
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
 export type PurchaseStatus = 'draft' | 'ordered' | 'partial' | 'received' | 'cancelled'
 
 export type PaymentStatus = 'unpaid' | 'partial' | 'paid'

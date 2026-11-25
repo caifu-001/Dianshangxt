@@ -480,6 +480,37 @@ create unique index if not exists uq_supplier_products_sku
 create index if not exists idx_supplier_products_supplier on public.supplier_products(supplier_id);
 create index if not exists idx_supplier_products_product on public.supplier_products(product_id);
 
+-- 供应商联系人：一家供应商可以有多个联系人，每人可留多种联系方式
+-- 主表中的 contact/phone/email 仅作为「主联系人快照」，供列表与采购页快速展示
+create table if not exists public.supplier_contacts (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  supplier_id     uuid not null references public.suppliers(id) on delete cascade,
+  name            text not null,
+  title           text,
+  phone           text,
+  mobile          text,
+  email           text,
+  im              text,                                  -- 微信 / WhatsApp / Telegram
+  is_primary      boolean not null default false,
+  note            text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+
+-- 旧库升级：把主表里已有的单一联系人迁移成一条主联系人（幂等）
+insert into public.supplier_contacts (user_id, supplier_id, name, title, phone, email, is_primary)
+select s.user_id, s.id, btrim(s.contact), s.contact_title, s.phone, s.email, true
+  from public.suppliers s
+ where s.contact is not null and btrim(s.contact) <> ''
+   and not exists (
+     select 1 from public.supplier_contacts c where c.supplier_id = s.id
+   );
+
+create index if not exists idx_supplier_contacts_supplier on public.supplier_contacts(supplier_id);
+create unique index if not exists uq_supplier_contacts_primary
+  on public.supplier_contacts(supplier_id) where is_primary;
+
 create table if not exists public.purchase_orders (
   id            uuid primary key default gen_random_uuid(),
   user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -945,7 +976,8 @@ begin
       ('purchase_items',       'purchase'),
       ('purchase_payments',    'purchase'),
       ('stock_movements',      'inventory'),
-      ('supplier_products',    'purchase')
+      ('supplier_products',    'purchase'),
+      ('supplier_contacts',    'purchase')
     ) as v(tbl, perm)
   loop
     execute format('drop policy if exists %I on public.%I', rec.tbl || '_select', rec.tbl);
@@ -2137,7 +2169,8 @@ grant select, insert, update, delete on
   public.profiles, public.stores, public.products, public.orders,
   public.inventory, public.campaigns, public.creators, public.tasks, public.expenses,
   public.competitors, public.competitor_snapshots,
-  public.suppliers, public.supplier_products, public.purchase_orders, public.purchase_items,
+  public.suppliers, public.supplier_products, public.supplier_contacts,
+  public.purchase_orders, public.purchase_items,
   public.departments, public.positions, public.roles,
   public.access_requests, public.employee_events, public.performance_reviews,
   public.stock_movements, public.purchase_payments

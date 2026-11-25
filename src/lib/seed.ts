@@ -368,6 +368,46 @@ export async function seedDemoData() {
       ].map((s) => ({ ...s, status: 'active' })),
     )
 
+    // 供应商联系人：一家供应商多位联系人（业务 / 跟单 / 工厂），演示多联系人档案
+    try {
+      const contactSeed: Array<
+        Array<{ name: string; title: string; phone: string; email: string; im?: string; note?: string }>
+      > = [
+        [
+          { name: '王建国', title: '销售经理', phone: '138-2688-4471', email: 'sales@hengmeihome.cn', im: 'wx_wangjg', note: '报价与样品只找他' },
+          { name: '李丽', title: '业务跟单', phone: '139-2299-1038', email: 'lily@hengmeihome.cn', im: 'lili_hm' },
+          { name: '陈厂长', title: '工厂排期', phone: '0769-8599-2233', email: 'factory@hengmeihome.cn', note: '只对接大货交期' },
+        ],
+        [
+          { name: '陈雅', title: '外贸经理', phone: '139-5799-2210', email: 'chenya@yiyao-ceramic.com', im: 'chenya_wx' },
+          { name: '吴婷', title: '客服跟单', phone: '0579-8551-7788', email: 'service@yiyao-ceramic.com' },
+        ],
+        [
+          { name: '林曦', title: '大客户销售', phone: '136-0208-9931', email: 'lily@zhuangyuan-bio.cn', im: 'linxi_wx' },
+          { name: '赵工', title: '品质负责人', phone: '020-3705-6688', email: 'qa@zhuangyuan-bio.cn', note: '客诉与质检报告找他' },
+        ],
+        [
+          { name: '周敏', title: '销售主管', phone: '137-5812-6677', email: 'zhoumin@siyu-silk.cn' },
+          { name: '许晴', title: '打样专员', phone: '0571-8876-2210', email: 'sample@siyu-silk.cn', im: 'xuqing_sample' },
+        ],
+      ]
+      const contactRows = contactSeed.flatMap((list, supplierIndex) =>
+        list.map((c, i) => ({
+          supplier_id: supplierRows[supplierIndex].id,
+          name: c.name,
+          title: c.title,
+          phone: c.phone,
+          email: c.email,
+          im: c.im ?? null,
+          note: c.note ?? null,
+          is_primary: i === 0,
+        })),
+      )
+      await insertRows('supplier_contacts', contactRows)
+    } catch {
+      // 旧库还没有联系人表：主表里的单一联系人快照仍然可用
+    }
+
     // 供应商可供产品 / 报价：与采购单里的品类对应，供缺货补货自动带价
     const spSeed: Array<{ supplier: number; product: number; cost: number; lead: number; tags: string[] }> = [
       { supplier: 0, product: 0, cost: 45.5, lead: 25, tags: ['快速打样'] },

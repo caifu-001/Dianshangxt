@@ -1672,6 +1672,7 @@ export default function Procurement() {
         open={supOpen}
         onClose={() => setSupOpen(false)}
         title={editingSup ? '编辑供应商' : '新增供应商'}
+        description="采购流程里的简版档案；多位联系人与多款商品请到「供应商管理库」维护"
         width="max-w-2xl"
         footer={
           <>

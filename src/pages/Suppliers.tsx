@@ -19,7 +19,7 @@ import {
   Wallet,
 } from 'lucide-react'
 import dayjs from 'dayjs'
-import { callRpc, deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
+import { callRpc, deleteRow, deleteWhere, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
 import { useAsync } from '../hooks/useAsync'
 import { useAuth } from '../context/AuthContext'
 import { convert, useFx } from '../lib/fx'
@@ -29,6 +29,7 @@ import type {
   PurchaseItem,
   PurchaseOrder,
   Supplier,
+  SupplierContact,
   SupplierProduct,
 } from '../lib/types'
 import {
@@ -164,6 +165,8 @@ const EMPTY_SUP: SupForm = {
 }
 
 interface SpForm {
+  /** 前端行标识，批量编辑时用 */
+  key: string
   id?: string
   supplier_id: string
   product_id: string
@@ -179,6 +182,7 @@ interface SpForm {
 }
 
 const EMPTY_SP: SpForm = {
+  key: '',
   supplier_id: '',
   product_id: '',
   sku: '',
@@ -190,6 +194,80 @@ const EMPTY_SP: SpForm = {
   lead_time_days: '30',
   status: 'active',
   note: '',
+}
+
+/* ---------------- 多联系人 / 多商品编辑助手 ---------------- */
+
+let rowSeq = 0
+/** 前端临时行 ID（新建记录还没数据库 id 时使用） */
+function uid() {
+  rowSeq += 1
+  return `row-${Date.now().toString(36)}-${rowSeq}`
+}
+
+interface ContactForm {
+  key: string
+  id?: string
+  name: string
+  title: string
+  phone: string
+  mobile: string
+  email: string
+  im: string
+  is_primary: boolean
+  note: string
+}
+
+function newContactForm(primary = false): ContactForm {
+  return {
+    key: uid(),
+    name: '',
+    title: '',
+    phone: '',
+    mobile: '',
+    email: '',
+    im: '',
+    is_primary: primary,
+    note: '',
+  }
+}
+
+function contactFromRow(c: SupplierContact): ContactForm {
+  return {
+    key: c.id,
+    id: c.id,
+    name: c.name,
+    title: c.title ?? '',
+    phone: c.phone ?? '',
+    mobile: c.mobile ?? '',
+    email: c.email ?? '',
+    im: c.im ?? '',
+    is_primary: c.is_primary,
+    note: c.note ?? '',
+  }
+}
+
+function newSpForm(): SpForm {
+  return { ...EMPTY_SP, key: uid() }
+}
+
+function spFromRow(sp: SupplierProduct): SpForm {
+  return {
+    ...EMPTY_SP,
+    key: sp.id,
+    id: sp.id,
+    supplier_id: sp.supplier_id,
+    product_id: sp.product_id ?? '',
+    sku: sp.sku,
+    title: sp.title ?? '',
+    unit: sp.unit,
+    currency: sp.currency,
+    unit_cost: String(sp.unit_cost),
+    moq: String(sp.moq),
+    lead_time_days: String(sp.lead_time_days),
+    status: sp.status,
+    note: sp.note ?? '',
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -208,6 +286,9 @@ export default function Suppliers() {
 
   const [supOpen, setSupOpen] = useState(false)
   const [supForm, setSupForm] = useState<SupForm>(EMPTY_SUP)
+  /** 一次编辑里可维护多个联系人 + 多款可供商品 */
+  const [supContacts, setSupContacts] = useState<ContactForm[]>([])
+  const [supProducts, setSupProducts] = useState<SpForm[]>([])
   const [supSaving, setSupSaving] = useState(false)
   const [spOpen, setSpOpen] = useState(false)
   const [spForm, setSpForm] = useState<SpForm>(EMPTY_SP)
@@ -219,17 +300,20 @@ export default function Suppliers() {
   const [productSupplier, setProductSupplier] = useState('')
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [suppliers, products, supplierProducts, pos, items, directory] = await Promise.all([
+    const [suppliers, products, supplierProducts, contacts, pos, items, directory] = await Promise.all([
       fetchRows<Supplier>('suppliers', { order: { column: 'created_at' } }),
       fetchRows<Product>('products', { order: { column: 'created_at' } }),
       fetchRows<SupplierProduct>('supplier_products', { order: { column: 'created_at' } }).catch(
         () => [] as SupplierProduct[],
       ),
+      fetchRows<SupplierContact>('supplier_contacts', { order: { column: 'created_at' } }).catch(
+        () => [] as SupplierContact[],
+      ),
       fetchRows<PurchaseOrder>('purchase_orders', { order: { column: 'order_date', ascending: false } }),
       fetchRows<PurchaseItem>('purchase_items'),
       callRpc<DirectoryRow[]>('team_directory').catch(() => [] as DirectoryRow[]),
     ])
-    return { suppliers, products, supplierProducts, pos, items, directory }
+    return { suppliers, products, supplierProducts, contacts, pos, items, directory }
   }, [])
 
   const supplierMap = useMemo(
@@ -240,6 +324,16 @@ export default function Suppliers() {
     () => new Map((data?.products ?? []).map((p) => [p.id, p])),
     [data],
   )
+  const contactsBySupplier = useMemo(() => {
+    const map = new Map<string, SupplierContact[]>()
+    for (const c of data?.contacts ?? []) {
+      const list = map.get(c.supplier_id) ?? []
+      list.push(c)
+      map.set(c.supplier_id, list)
+    }
+    return map
+  }, [data])
+
   const memberMap = useMemo(
     () => new Map((data?.directory ?? []).map((m) => [m.id, m])),
     [data],
@@ -320,12 +414,20 @@ export default function Suppliers() {
         s.email ?? '',
         s.category ?? '',
         ...(s.tags ?? []),
+        ...(contactsBySupplier.get(s.id) ?? []).flatMap((c) => [
+          c.name,
+          c.title ?? '',
+          c.phone ?? '',
+          c.mobile ?? '',
+          c.email ?? '',
+          c.im ?? '',
+        ]),
       ]
         .join(' ')
         .toLowerCase()
         .includes(kw)
     })
-  }, [data, query, status, category])
+  }, [data, query, status, category, contactsBySupplier])
 
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
 
@@ -363,6 +465,8 @@ export default function Suppliers() {
 
   function openCreate() {
     setSupForm({ ...EMPTY_SUP, owner_id: user?.id ?? '' })
+    setSupContacts([newContactForm(true)])
+    setSupProducts([])
     setSupOpen(true)
   }
 
@@ -394,21 +498,72 @@ export default function Suppliers() {
       status: s.status,
       note: s.note ?? '',
     })
+    const saved = (data?.contacts ?? []).filter((c) => c.supplier_id === s.id).map(contactFromRow)
+    // 旧库还没迁移联系人时，把主表里的单一联系人快照先显示在第一行
+    setSupContacts(
+      saved.length
+        ? saved
+        : s.contact
+          ? [
+              {
+                ...newContactForm(true),
+                name: s.contact,
+                title: s.contact_title ?? '',
+                phone: s.phone ?? '',
+                email: s.email ?? '',
+              },
+            ]
+          : [newContactForm(true)],
+    )
+    setSupProducts(
+      (data?.supplierProducts ?? []).filter((sp) => sp.supplier_id === s.id).map(spFromRow),
+    )
     setSupOpen(true)
+  }
+
+  /** 设为主联系人时自动取消其他行的主标记 */
+  function updateContact(key: string, patch: Partial<ContactForm>) {
+    setSupContacts((list) =>
+      list.map((c) => {
+        if (c.key !== key) return patch.is_primary ? { ...c, is_primary: false } : c
+        return { ...c, ...patch }
+      }),
+    )
   }
 
   async function saveSupplier() {
     if (!supForm.name.trim()) return push('请填写供应商名称', 'error')
+
+    // 完全空白的行直接忽略；填了联系方式却没姓名要拦住，避免脏数据
+    const activeContacts = supContacts.filter((c) =>
+      [c.name, c.title, c.phone, c.mobile, c.email, c.im, c.note].some((v) => v.trim()),
+    )
+    if (activeContacts.some((c) => !c.name.trim()))
+      return push('联系人已填写联系方式，请补上姓名', 'error')
+    if (activeContacts.some((c) => c.email.trim() && !/^\S+@\S+\.\S+$/.test(c.email.trim())))
+      return push('联系人邮箱格式不正确', 'error')
+
+    const activeProducts = supProducts.filter((sp) =>
+      [sp.sku, sp.title, sp.unit_cost, sp.product_id].some((v) => String(v).trim()),
+    )
+    if (activeProducts.some((sp) => !sp.sku.trim()))
+      return push('可供产品已填写内容，请补上 SKU', 'error')
+    const skus = activeProducts.map((sp) => sp.sku.trim().toLowerCase())
+    if (new Set(skus).size !== skus.length) return push('同一供应商下 SKU 不能重复', 'error')
+
+    const primary = activeContacts.find((c) => c.is_primary) ?? activeContacts[0]
+    const nowIso = new Date().toISOString()
     setSupSaving(true)
     try {
       const payload = {
         code: supForm.code.trim() || null,
         name: supForm.name.trim(),
-        contact: supForm.contact.trim() || null,
-        contact_title: supForm.contact_title.trim() || null,
-        phone: supForm.phone.trim() || null,
+        // 主联系人快照同步回主表：列表、采购简版与旧数据都按这份快速展示
+        contact: primary?.name.trim() || null,
+        contact_title: primary?.title.trim() || null,
+        phone: primary?.mobile.trim() || primary?.phone.trim() || null,
         fax: supForm.fax.trim() || null,
-        email: supForm.email.trim() || null,
+        email: primary?.email.trim() || null,
         website: supForm.website.trim() || null,
         country: supForm.country.trim() || null,
         city: supForm.city.trim() || null,
@@ -429,14 +584,97 @@ export default function Suppliers() {
         cooperation_since: supForm.cooperation_since || null,
         status: supForm.status,
         note: supForm.note.trim() || null,
-        updated_at: new Date().toISOString(),
+        updated_at: nowIso,
       }
-      if (supForm.id) {
-        await updateRow<Supplier>('suppliers', supForm.id, payload)
-        push('供应商档案已更新')
+      let supplierId = supForm.id
+      if (supplierId) {
+        await updateRow<Supplier>('suppliers', supplierId, payload)
       } else {
-        await insertRow<Supplier>('suppliers', { ...payload, user_id: user?.id })
-        push('供应商已创建，可继续添加可供产品')
+        const created = await insertRow<Supplier>('suppliers', { ...payload, user_id: user?.id })
+        supplierId = created.id
+      }
+
+      let warning = ''
+      // 联系人：编辑时先清再插，保证删除联系人 / 换主联系人都能落库
+      try {
+        if (supplierId) {
+          if (supForm.id) await deleteWhere('supplier_contacts', 'supplier_id', supplierId)
+          const rows = activeContacts.map((c) => ({
+            supplier_id: supplierId,
+            user_id: user?.id,
+            name: c.name.trim(),
+            title: c.title.trim() || null,
+            phone: c.phone.trim() || null,
+            mobile: c.mobile.trim() || null,
+            email: c.email.trim() || null,
+            im: c.im.trim() || null,
+            is_primary: primary ? c.key === primary.key : false,
+            note: c.note.trim() || null,
+            updated_at: nowIso,
+          }))
+          if (rows.length) await insertRows('supplier_contacts', rows)
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : ''
+        warning = /could not find the table|relation .* does not exist|column .* does not exist/i.test(msg)
+          ? '联系人（数据库未升级，请到「数据源」重跑建表脚本）'
+          : '联系人'
+      }
+
+      // 可供产品：有 id 的更新、新增的插入、被移除的删除
+      try {
+        if (supplierId) {
+          const keep = new Set(activeProducts.filter((p) => p.id).map((p) => p.id as string))
+          if (supForm.id) {
+            const oldIds = (data?.supplierProducts ?? [])
+              .filter((sp) => sp.supplier_id === supplierId)
+              .map((sp) => sp.id)
+            for (const id of oldIds) if (!keep.has(id)) await deleteRow('supplier_products', id)
+          }
+          const spPayload = (sp: SpForm) => ({
+            supplier_id: supplierId,
+            product_id: sp.product_id || null,
+            sku: sp.sku.trim(),
+            title: sp.title.trim() || null,
+            unit: sp.unit.trim() || '件',
+            currency: sp.currency,
+            unit_cost: Math.max(0, Number(sp.unit_cost) || 0),
+            moq: Math.max(1, Math.round(Number(sp.moq) || 1)),
+            lead_time_days: Math.max(0, Math.round(Number(sp.lead_time_days) || 0)),
+            status: sp.status,
+            note: sp.note.trim() || null,
+            updated_at: nowIso,
+          })
+          for (const p of activeProducts.filter((x) => x.id))
+            await updateRow('supplier_products', p.id as string, spPayload(p))
+          const fresh = activeProducts.filter((x) => !x.id)
+          if (fresh.length)
+            await insertRows(
+              'supplier_products',
+              fresh.map((p) => ({ ...spPayload(p), user_id: user?.id })),
+            )
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : ''
+        const needUpgrade = /could not find the table|relation .* does not exist|column .* does not exist/i.test(msg)
+        warning = warning
+          ? '联系人与可供产品'
+          : needUpgrade
+            ? '可供产品（数据库未升级，请到「数据源」重跑建表脚本）'
+            : '可供产品'
+      }
+
+      if (warning) {
+        push(
+          `${supForm.id ? '档案已更新' : '供应商已创建'}，但${warning}未能保存，请重新打开档案重试`,
+          'error',
+        )
+      } else {
+        push(
+          supForm.id
+            ? '供应商档案、联系人与可供产品已更新'
+            : `供应商已创建（${activeContacts.length} 位联系人 / ${activeProducts.length} 款商品）`,
+        )
       }
       setSupOpen(false)
       reload()
@@ -467,25 +705,12 @@ export default function Suppliers() {
   /* ---------------- 可供产品 ---------------- */
 
   function openSpCreate(supplierId?: string) {
-    setSpForm({ ...EMPTY_SP, supplier_id: supplierId ?? productSupplier ?? '' })
+    setSpForm({ ...newSpForm(), supplier_id: supplierId ?? productSupplier ?? '' })
     setSpOpen(true)
   }
 
   function openSpEdit(sp: SupplierProduct) {
-    setSpForm({
-      id: sp.id,
-      supplier_id: sp.supplier_id,
-      product_id: sp.product_id ?? '',
-      sku: sp.sku,
-      title: sp.title ?? '',
-      unit: sp.unit,
-      currency: sp.currency,
-      unit_cost: String(sp.unit_cost),
-      moq: String(sp.moq),
-      lead_time_days: String(sp.lead_time_days),
-      status: sp.status,
-      note: sp.note ?? '',
-    })
+    setSpForm(spFromRow(sp))
     setSpOpen(true)
   }
 
@@ -552,6 +777,21 @@ export default function Suppliers() {
     }))
   }
 
+  function updateSp(key: string, patch: Partial<SpForm>) {
+    setSupProducts((list) => list.map((sp) => (sp.key === key ? { ...sp, ...patch } : sp)))
+  }
+
+  /** 档案弹窗里批量录入商品时，选商品档案同样自动带出信息 */
+  function pickBulkProduct(id: string, key: string) {
+    const p = productMap.get(id)
+    updateSp(key, {
+      product_id: id,
+      sku: p?.sku ?? '',
+      title: p?.title ?? '',
+      unit_cost: p?.cost_price !== undefined ? String(p.cost_price) : '0',
+    })
+  }
+
   /* ---------------- 导入导出 ---------------- */
 
   function exportSuppliers() {
@@ -559,6 +799,12 @@ export default function Suppliers() {
       编码: s.code ?? '',
       名称: s.name,
       联系人: s.contact ?? '',
+      联系人列表: (contactsBySupplier.get(s.id) ?? [])
+        .map(
+          (c) =>
+            `${c.name}${c.title ? `(${c.title})` : ''}${c.mobile || c.phone ? ` ${c.mobile || c.phone}` : ''}${c.email ? ` ${c.email}` : ''}${c.im ? ` ${c.im}` : ''}`,
+        )
+        .join(' / '),
       职务: s.contact_title ?? '',
       电话: s.phone ?? '',
       邮箱: s.email ?? '',
@@ -591,6 +837,12 @@ export default function Suppliers() {
     const iContact = idx('联系人', 'contact')
     const iPhone = idx('电话', 'phone')
     const iEmail = idx('邮箱', 'email')
+    // 额外联系人列：联系人2 / 电话2 / 邮箱2、联系人3 …… 最多再导入 3 位
+    const extraColumns = [2, 3, 4].map((n) => ({
+      name: idx(`联系人${n}`),
+      phone: idx(`电话${n}`, `手机${n}`),
+      email: idx(`邮箱${n}`),
+    }))
     const iCategory = idx('品类', 'category', '主营品类')
     const iTerms = idx('结算方式', 'payment_terms')
     const iLead = idx('交期天数', 'lead_time_days')
@@ -604,7 +856,7 @@ export default function Suppliers() {
       const name = get(c, iName)
       if (!name) continue
       try {
-        await insertRow('suppliers', {
+        const created = await insertRow<{ id: string }>('suppliers', {
           user_id: user?.id,
           name,
           code: get(c, iCode) || null,
@@ -616,6 +868,43 @@ export default function Suppliers() {
           lead_time_days: Math.max(0, Number(get(c, iLead)) || 30),
           note: get(c, iNote) || null,
         })
+        const contacts = [
+          ...(get(c, iContact)
+            ? [
+                {
+                  name: get(c, iContact),
+                  phone: get(c, iPhone),
+                  email: get(c, iEmail),
+                  is_primary: true,
+                },
+              ]
+            : []),
+          ...extraColumns
+            .map((x) => ({
+              name: get(c, x.name),
+              phone: get(c, x.phone),
+              email: get(c, x.email),
+              is_primary: false,
+            }))
+            .filter((x) => x.name),
+        ]
+        if (contacts.length) {
+          try {
+            await insertRows(
+              'supplier_contacts',
+              contacts.map((x) => ({
+                user_id: user?.id,
+                supplier_id: created.id,
+                name: x.name,
+                phone: x.phone || null,
+                email: x.email || null,
+                is_primary: x.is_primary,
+              })),
+            )
+          } catch {
+            // 旧库还没建联系人表：主表里的主联系人快照仍然有效
+          }
+        }
         ok += 1
       } catch {
         failed += 1
@@ -631,7 +920,7 @@ export default function Suppliers() {
     <div>
       <PageHeader
         title="供应商管理库"
-        description="集中维护供应商档案、联系方式、资质结算与可供产品报价，采购绩效自动汇总"
+        description="集中维护供应商档案、多位联系人、多款商品报价与资质结算，采购绩效自动汇总"
         actions={
           <>
             <label className="btn btn-default h-8 px-3 cursor-pointer">
@@ -790,6 +1079,8 @@ export default function Suppliers() {
                       const st = stats.get(s.id)
                       const meta = STATUS_META[s.status] ?? STATUS_META.active
                       const owner = s.owner_id ? memberMap.get(s.owner_id) : null
+                      const contacts = contactsBySupplier.get(s.id) ?? []
+                      const pc = contacts.find((c) => c.is_primary) ?? contacts[0]
                       return (
                         <tr
                           key={s.id}
@@ -816,11 +1107,16 @@ export default function Suppliers() {
                           </td>
                           <td className="td">
                             <p className="text-[11.5px] text-ink-700">
-                              {s.contact || '—'}
-                              {s.contact_title ? `（${s.contact_title}）` : ''}
+                              {pc?.name || s.contact || '—'}
+                              {pc?.title ? `（${pc.title}）` : ''}
+                              {contacts.length > 1 && (
+                                <span className="ml-1 text-[10px] text-brand-600 whitespace-nowrap">
+                                  等 {contacts.length} 人
+                                </span>
+                              )}
                             </p>
                             <p className="text-[10.5px] text-ink-400 truncate max-w-[160px]">
-                              {s.phone || s.email || '未留联系方式'}
+                              {pc?.mobile || pc?.phone || s.phone || pc?.email || s.email || '未留联系方式'}
                             </p>
                           </td>
                           <td className="td">
@@ -915,7 +1211,7 @@ export default function Suppliers() {
             <div className="flex-1 min-w-[180px]">
               <p className="text-[12px] font-medium text-ink-800">一家供应商可以有多个可供 SKU 与报价</p>
               <p className="text-[11px] text-ink-400 mt-0.5">
-                同一供应商下 SKU 唯一；报价用于缺货补货时自动带入采购单
+                同一供应商下 SKU 唯一；编辑供应商档案时可一次录入多位联系人与多款商品
               </p>
             </div>
             <Select
@@ -1129,7 +1425,7 @@ export default function Suppliers() {
         open={supOpen}
         onClose={() => setSupOpen(false)}
         title={supForm.id ? '编辑供应商档案' : '新建供应商'}
-        description="带 * 为必填；联系方式与资质会同步给采购、财务同事"
+        description="带 * 为必填；可一次添加多位联系人与多款可供商品，资质会同步给采购、财务同事"
         width="max-w-3xl"
         footer={
           <>
@@ -1196,43 +1492,127 @@ export default function Suppliers() {
           </div>
 
           <div>
-            <p className="text-[11px] font-semibold text-brand-600 mb-2">联系方式</p>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-[11px] font-semibold text-brand-600">
+                联系人
+                <span className="ml-1 font-normal text-ink-400">
+                  可添加多位；主联系人会同步到列表与采购页
+                </span>
+              </p>
+              <button
+                type="button"
+                className="text-[11px] text-brand-600 hover:text-brand-700 inline-flex items-center gap-0.5 shrink-0"
+                onClick={() => setSupContacts((list) => [...list, newContactForm(list.length === 0)])}
+              >
+                <Plus className="w-3 h-3" /> 添加联系人
+              </button>
+            </div>
+            {!supContacts.length ? (
+              <p className="text-[11px] text-ink-400 border border-dashed border-ink-200 rounded-lg px-3 py-4 text-center">
+                还没有联系人，点右上「添加联系人」录入第一位
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {supContacts.map((c, i) => (
+                  <div key={c.key} className="rounded-xl border border-ink-200/70 bg-ink-50/40 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10.5px] font-medium text-ink-500">联系人 {i + 1}</span>
+                        <button
+                          type="button"
+                          title="设为主联系人"
+                          className={cn(
+                            'inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors',
+                            c.is_primary
+                              ? 'border-amber-300 bg-amber-50 text-amber-700'
+                              : 'border-ink-200 text-ink-400 hover:text-amber-600 hover:border-amber-200',
+                          )}
+                          onClick={() => updateContact(c.key, { is_primary: true })}
+                        >
+                          <Star
+                            className={cn('w-3 h-3', c.is_primary && 'fill-amber-400 text-amber-400')}
+                          />
+                          {c.is_primary ? '主联系人' : '设为主联系人'}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        title="删除该联系人"
+                        className="p-1 rounded text-ink-400 hover:text-rose-600 hover:bg-rose-50"
+                        onClick={() => setSupContacts((list) => list.filter((x) => x.key !== c.key))}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                      <Field label="姓名" required>
+                        <input
+                          className="input"
+                          value={c.name}
+                          placeholder="如：张经理"
+                          onChange={(e) => updateContact(c.key, { name: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="职务">
+                        <input
+                          className="input"
+                          value={c.title}
+                          placeholder="如：销售经理"
+                          onChange={(e) => updateContact(c.key, { title: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="电话 / 座机">
+                        <input
+                          className="input"
+                          value={c.phone}
+                          onChange={(e) => updateContact(c.key, { phone: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="手机">
+                        <input
+                          className="input"
+                          value={c.mobile}
+                          onChange={(e) => updateContact(c.key, { mobile: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="邮箱">
+                        <input
+                          className="input"
+                          type="email"
+                          value={c.email}
+                          onChange={(e) => updateContact(c.key, { email: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="微信 / WhatsApp">
+                        <input
+                          className="input"
+                          value={c.im}
+                          onChange={(e) => updateContact(c.key, { im: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="备注" className="md:col-span-3">
+                        <input
+                          className="input"
+                          value={c.note}
+                          placeholder="如：只对接样品单 / 晚间可联系"
+                          onChange={(e) => updateContact(c.key, { note: e.target.value })}
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <p className="text-[11px] font-semibold text-brand-600 mb-2">其他联系方式 / 地址</p>
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              <Field label="联系人">
-                <input
-                  className="input"
-                  value={supForm.contact}
-                  onChange={(e) => setSupForm({ ...supForm, contact: e.target.value })}
-                />
-              </Field>
-              <Field label="职务">
-                <input
-                  className="input"
-                  value={supForm.contact_title}
-                  placeholder="如：销售经理"
-                  onChange={(e) => setSupForm({ ...supForm, contact_title: e.target.value })}
-                />
-              </Field>
-              <Field label="电话 / 手机">
-                <input
-                  className="input"
-                  value={supForm.phone}
-                  onChange={(e) => setSupForm({ ...supForm, phone: e.target.value })}
-                />
-              </Field>
               <Field label="传真">
                 <input
                   className="input"
                   value={supForm.fax}
                   onChange={(e) => setSupForm({ ...supForm, fax: e.target.value })}
-                />
-              </Field>
-              <Field label="邮箱">
-                <input
-                  className="input"
-                  type="email"
-                  value={supForm.email}
-                  onChange={(e) => setSupForm({ ...supForm, email: e.target.value })}
                 />
               </Field>
               <Field label="官网">
@@ -1341,6 +1721,133 @@ export default function Suppliers() {
                 />
               </Field>
             </div>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-[11px] font-semibold text-brand-600">
+                可供产品 / 报价
+                <span className="ml-1 font-normal text-ink-400">
+                  一家供应商可登记多款商品，缺货补货时自动带价
+                </span>
+              </p>
+              <button
+                type="button"
+                className="text-[11px] text-brand-600 hover:text-brand-700 inline-flex items-center gap-0.5 shrink-0"
+                onClick={() =>
+                  setSupProducts((list) => [
+                    ...list,
+                    { ...newSpForm(), supplier_id: supForm.id ?? '' },
+                  ])
+                }
+              >
+                <Plus className="w-3 h-3" /> 添加商品
+              </button>
+            </div>
+            {!supProducts.length ? (
+              <p className="text-[11px] text-ink-400 border border-dashed border-ink-200 rounded-lg px-3 py-4 text-center">
+                还没有登记可供商品，点右上「添加商品」录入 SKU、报价与起订量
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {supProducts.map((sp, i) => (
+                  <div key={sp.key} className="rounded-xl border border-ink-200/70 bg-ink-50/40 p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10.5px] font-medium text-ink-500">商品 {i + 1}</span>
+                      <button
+                        type="button"
+                        title="移除该商品"
+                        className="p-1 rounded text-ink-400 hover:text-rose-600 hover:bg-rose-50"
+                        onClick={() => setSupProducts((list) => list.filter((x) => x.key !== sp.key))}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                      <Field label="关联商品档案" className="md:col-span-2">
+                        <Select
+                          value={sp.product_id}
+                          onChange={(v) => pickBulkProduct(v, sp.key)}
+                          options={(data?.products ?? []).map((p) => ({
+                            value: p.id,
+                            label: `${p.sku} · ${p.title || '未命名'}`,
+                          }))}
+                          placeholder="（不关联，手工填写）"
+                        />
+                      </Field>
+                      <Field label="SKU" required>
+                        <input
+                          className="input font-mono"
+                          value={sp.sku}
+                          onChange={(e) => updateSp(sp.key, { sku: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="产品名称">
+                        <input
+                          className="input"
+                          value={sp.title}
+                          onChange={(e) => updateSp(sp.key, { title: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="报价">
+                        <input
+                          className="input num"
+                          type="number"
+                          step="0.0001"
+                          value={sp.unit_cost}
+                          onChange={(e) => updateSp(sp.key, { unit_cost: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="币种">
+                        <Select
+                          value={sp.currency}
+                          onChange={(v) => updateSp(sp.key, { currency: v })}
+                          options={[
+                            { value: 'CNY', label: 'CNY 人民币' },
+                            { value: 'USD', label: 'USD 美元' },
+                          ]}
+                        />
+                      </Field>
+                      <Field label="单位">
+                        <input
+                          className="input"
+                          value={sp.unit}
+                          onChange={(e) => updateSp(sp.key, { unit: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="起订量 MOQ">
+                        <input
+                          className="input num"
+                          type="number"
+                          min="1"
+                          value={sp.moq}
+                          onChange={(e) => updateSp(sp.key, { moq: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="交期（天）">
+                        <input
+                          className="input num"
+                          type="number"
+                          min="0"
+                          value={sp.lead_time_days}
+                          onChange={(e) => updateSp(sp.key, { lead_time_days: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="状态">
+                        <Select
+                          value={sp.status}
+                          onChange={(v) => updateSp(sp.key, { status: v as 'active' | 'paused' })}
+                          options={[
+                            { value: 'active', label: '可供' },
+                            { value: 'paused', label: '暂停' },
+                          ]}
+                        />
+                      </Field>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </Modal>
@@ -1541,19 +2048,53 @@ export default function Suppliers() {
             <div className="grid md:grid-cols-2 gap-3">
               <div className="rounded-xl border border-ink-200/70 bg-ink-50/50 p-3.5">
                 <p className="text-[11px] font-semibold text-ink-500 mb-2 flex items-center gap-1.5">
-                  <UserRound className="w-3.5 h-3.5" /> 联系方式
+                  <UserRound className="w-3.5 h-3.5" /> 联系人
+                  <span className="num text-ink-400 font-normal">
+                    {(contactsBySupplier.get(detail.id) ?? []).length}
+                  </span>
                 </p>
-                <dl className="space-y-1.5 text-[11.5px]">
+                {(contactsBySupplier.get(detail.id) ?? []).length ? (
+                  <div className="space-y-2">
+                    {(contactsBySupplier.get(detail.id) ?? []).map((c) => (
+                      <div key={c.id} className="rounded-lg bg-white border border-ink-200/70 px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11.5px] font-medium text-ink-800">
+                            {c.name}
+                            {c.title ? (
+                              <span className="ml-1 text-[10px] text-ink-400">· {c.title}</span>
+                            ) : null}
+                          </span>
+                          {c.is_primary && (
+                            <span className="text-[9.5px] px-1 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200/60 whitespace-nowrap">
+                              主联系人
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10.5px] text-ink-500 mt-1 break-all">
+                          {[c.mobile, c.phone, c.email, c.im].filter(Boolean).join(' · ') ||
+                            '未留联系方式'}
+                        </p>
+                        {c.note && <p className="text-[10px] text-ink-400 mt-0.5">{c.note}</p>}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-ink-400 break-all">
+                    {detail.contact
+                      ? `${detail.contact}${detail.contact_title ? ` · ${detail.contact_title}` : ''}${
+                          detail.phone ? ` · ${detail.phone}` : ''
+                        }${detail.email ? ` · ${detail.email}` : ''}`
+                      : '未登记联系人'}
+                  </p>
+                )}
+                <dl className="space-y-1 text-[11px] mt-2.5 pt-2 border-t border-ink-100">
                   {[
-                    ['联系人', detail.contact ? `${detail.contact}${detail.contact_title ? ` · ${detail.contact_title}` : ''}` : ''],
-                    ['电话', detail.phone ?? ''],
                     ['传真', detail.fax ?? ''],
-                    ['邮箱', detail.email ?? ''],
                     ['官网', detail.website ?? ''],
                     ['地址', [detail.country, detail.city, detail.address].filter(Boolean).join(' ')],
                   ].map(([k, v]) => (
                     <div key={k} className="flex gap-2">
-                      <dt className="text-ink-400 w-12 shrink-0">{k}</dt>
+                      <dt className="text-ink-400 w-9 shrink-0">{k}</dt>
                       <dd className="text-ink-700 break-all">{v || '—'}</dd>
                     </div>
                   ))}
@@ -1666,8 +2207,8 @@ export default function Suppliers() {
 
       <p className="mt-4 text-[11px] leading-relaxed text-ink-400 flex items-start gap-1.5">
         <Globe2 className="w-3.5 h-3.5 text-ink-300 mt-0.5 shrink-0" />
-        供应商档案与采购、库存、财务打通：建采购单时选这里维护的供应商，付款与到货会自动汇总到「供货绩效」；
-        档案里的业务负责人用于采购业绩归集，缺货补货会优先使用这里登记的可供产品报价。
+        供应商档案与采购、库存、财务打通：一家供应商可维护多位联系人与多款商品，主联系人同步到列表和采购页；
+        建采购单时选这里维护的供应商，付款与到货会自动汇总到「供货绩效」，缺货补货优先使用这里登记的可供产品报价。
       </p>
     </div>
   )
