@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import {
   ArrowRight,
+  ClipboardList,
   Download,
   GitBranch,
   Pencil,
@@ -17,14 +18,19 @@ import { callRpc, deleteRow, fetchRows, insertRow, insertRows, updateRow } from 
 import { ORDER_STATUS } from '../lib/constants'
 import { useAuth } from '../context/AuthContext'
 import {
+  APPROVAL_META,
+  FLOW_STAGE_META,
+  PAYMENT_META,
   STOCK_STATE_META,
   TRACE_META,
   createPoFromShortage,
+  createStockTransfer,
+  fetchOrderFlow,
   fetchOrderTrace,
   fulfillOrder,
   restoreOrderStock,
 } from '../lib/flow'
-import type { Order, Product, Store, Supplier, TraceEvent } from '../lib/types'
+import type { Order, OrderFlow, Product, Store, Supplier, TraceEvent } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
   Badge,
@@ -160,6 +166,13 @@ export default function Orders() {
   const [shortageSaving, setShortageSaving] = useState(false)
   const [trace, setTrace] = useState<{ order: Order; timeline: TraceEvent[] } | null>(null)
   const [traceLoading, setTraceLoading] = useState(false)
+  const [flowOrder, setFlowOrder] = useState<Order | null>(null)
+  const [flow, setFlow] = useState<OrderFlow | null>(null)
+  const [flowLoading, setFlowLoading] = useState(false)
+  const [flowWh, setFlowWh] = useState('FBA-US')
+  const [transferQty, setTransferQty] = useState('')
+  const [transferTo, setTransferTo] = useState('FBA-US')
+  const [flowBusy, setFlowBusy] = useState(false)
   const fx = useFx()
 
   const { data, loading, error, reload } = useAsync(async () => {
@@ -368,6 +381,7 @@ export default function Orders() {
           supplier_id: '',
           unit_cost: String(product?.cost_price ?? 0),
         })
+        setFlowOrder(null)
         return
       }
       if (force) setShortage(null)
@@ -424,6 +438,62 @@ export default function Orders() {
     } finally {
       setShortageSaving(false)
     }
+  }
+
+  async function openFlow(order: Order) {
+    setFlowOrder(order)
+    setFlow(null)
+    setFlowWh(order.fulfillment_wh ?? 'FBA-US')
+    setTransferTo(order.fulfillment_wh ?? 'FBA-US')
+    setTransferQty(String(Math.max(1, order.quantity)))
+    setFlowLoading(true)
+    try {
+      setFlow(await fetchOrderFlow(order.id))
+    } catch (err) {
+      push(err instanceof Error ? err.message : '读取履约数据失败', 'error')
+    } finally {
+      setFlowLoading(false)
+    }
+  }
+
+  async function handleTransfer() {
+    if (!flowOrder || !flow) return
+    const qty = Math.max(1, Math.round(toNum(transferQty)))
+    const domestic = flow.warehouses.find((w) => w.warehouse === '国内仓')?.available ?? 0
+    if (qty > domestic) return push(`国内仓仅剩 ${num(domestic)} 件，请先生成采购单补货`, 'error')
+    setFlowBusy(true)
+    try {
+      const res = await createStockTransfer(flowOrder.id, qty, '国内仓', transferTo)
+      if (!res?.ok)
+        return push(res?.reason === 'shortage' ? `来源仓库存不足（可用 ${num(res.available ?? 0)} 件）` : '调拨失败', 'error')
+      push(`调拨单 ${res.transfer_no} 已创建，到货确认后即可出库`)
+      setFlow(await fetchOrderFlow(flowOrder.id))
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '创建调拨失败', 'error')
+    } finally {
+      setFlowBusy(false)
+    }
+  }
+
+  function openFlowPurchase() {
+    if (!flowOrder || !flow) return
+    const available = Math.max(
+      0,
+      ...flow.warehouses.filter((w) => w.warehouse !== '国内仓').map((w) => w.available),
+    )
+    const product = flowOrder.product_id ? productMap.get(flowOrder.product_id) : undefined
+    setShortage({
+      order: flowOrder,
+      available,
+      need: flowOrder.quantity,
+      shortage: Math.max(1, flowOrder.quantity - available),
+      warehouse: '国内仓',
+      qty: String(Math.max(1, flowOrder.quantity - available)),
+      supplier_id: '',
+      unit_cost: String(product?.cost_price ?? 0),
+    })
+    setFlowOrder(null)
   }
 
   async function openTrace(order: Order) {
@@ -689,6 +759,16 @@ export default function Orders() {
                       </td>
                       <td className="td">
                         <div className="flex items-center gap-0.5">
+                          {o.status !== 'cancelled' && (
+                            <button
+                              className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50"
+                              title="履约中心：查双仓库存 / 调拨 / 采购"
+                              disabled={busyId === o.id}
+                              onClick={() => openFlow(o)}
+                            >
+                              <ClipboardList className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           {canEdit && o.status !== 'cancelled' && (
                             o.stock_state === 'out' ? (
                               <button
@@ -893,6 +973,151 @@ export default function Orders() {
           </Field>
         }
       />
+
+      {/* 履约中心：订单 → 双仓库存 → 调拨 / 采购 → 财务 → 出库 */}
+      <Modal
+        open={!!flowOrder}
+        onClose={() => setFlowOrder(null)}
+        title="履约中心"
+        description={flowOrder ? `${flowOrder.order_no} · ${flowOrder.sku ?? '—'} × ${flowOrder.quantity} 件` : undefined}
+        width="max-w-3xl"
+        footer={
+          <>
+            <Button onClick={() => setFlowOrder(null)}>关闭</Button>
+            {canEdit && flow && flow.stage !== 'fulfilled' && (
+              <Button
+                variant="primary"
+                loading={busyId === flowOrder?.id}
+                onClick={() => flowOrder && handleFulfill({ ...flowOrder, fulfillment_wh: flowWh })}
+              >
+                按所选仓库出库
+              </Button>
+            )}
+          </>
+        }
+      >
+        {flowLoading || !flow ? (
+          <p className="py-10 text-center text-[12px] text-ink-400">正在读取履约数据…</p>
+        ) : (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-ink-200/70 bg-ink-50/50 px-4 py-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={cn('text-[11px] px-2 py-0.5 rounded-full border', FLOW_STAGE_META[flow.stage]?.cls)}>
+                  {FLOW_STAGE_META[flow.stage]?.label ?? flow.stage}
+                </span>
+                <span className="text-[12px] font-medium text-ink-800">{flow.advice}</span>
+              </div>
+              <p className="text-[11px] text-ink-400 mt-1.5">
+                流程：运营录单 → 查海外仓 / 公司库存 → 缺货调拨或找供应商采购 → 财务审核付款 → 到货入库 → 出库 → 利润与绩效归集
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {[
+                { title: '海外仓 / 3PL', rows: flow.warehouses.filter((w) => w.warehouse !== '国内仓') },
+                { title: '公司国内仓', rows: flow.warehouses.filter((w) => w.warehouse === '国内仓') },
+              ].map((group) => (
+                <div key={group.title} className="rounded-xl border border-ink-200/70 p-3.5">
+                  <p className="text-[11px] font-semibold text-ink-500 mb-2">{group.title}</p>
+                  {group.rows.length === 0 ? (
+                    <p className="text-[11.5px] text-ink-400">暂无库存记录</p>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {group.rows.map((w) => (
+                        <div key={w.warehouse} className="flex items-center justify-between text-[11.5px]">
+                          <span className="text-ink-600">{w.warehouse}</span>
+                          <span className="num text-ink-800">
+                            可用 <b>{num(w.available)}</b> · 在途 {num(w.inbound)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {flow.transfers.length > 0 && (
+              <div className="rounded-xl border border-orange-200/70 bg-orange-50/40 p-3.5">
+                <p className="text-[11px] font-semibold text-orange-700 mb-2">在途 / 已到货调拨</p>
+                {flow.transfers.map((t) => (
+                  <div key={t.id} className="flex items-center justify-between text-[11.5px] py-0.5">
+                    <span className="font-mono text-ink-700">{t.transfer_no}</span>
+                    <span className="text-ink-600">
+                      {t.from_warehouse} → {t.to_warehouse} · {num(t.qty)} 件 · {num(t.received_qty)} 已收 ·
+                      <span className="ml-1 text-orange-700">
+                        {{ in_transit: '在途', partial: '部分到货', received: '已到货', cancelled: '已取消' }[t.status] ?? t.status}
+                      </span>
+                    </span>
+                  </div>
+                ))}
+                <p className="text-[10.5px] text-ink-400 mt-1.5">到货确认在「库存管理 → 在途调拨」办理</p>
+              </div>
+            )}
+
+            {flow.pos.length > 0 && (
+              <div className="rounded-xl border border-violet-200/70 bg-violet-50/40 p-3.5">
+                <p className="text-[11px] font-semibold text-violet-700 mb-2">关联采购与财务状态</p>
+                {flow.pos.map((p) => (
+                  <div key={p.id} className="flex items-center justify-between gap-2 text-[11.5px] py-1 flex-wrap">
+                    <span className="font-mono text-ink-700">{p.po_no}</span>
+                    <span className="text-ink-600">{p.supplier ?? '未指定供应商'}</span>
+                    <span className="num text-ink-600">到货 {num(p.received_qty)}/{num(p.qty)}</span>
+                    <span className={cn('text-[10px] px-1.5 py-0.5 rounded border', APPROVAL_META[p.approval_status]?.cls)}>
+                      {APPROVAL_META[p.approval_status]?.label ?? p.approval_status}
+                    </span>
+                    <span className={cn('text-[10px] px-1.5 py-0.5 rounded border', PAYMENT_META[p.payment_status]?.cls)}>
+                      {PAYMENT_META[p.payment_status]?.label ?? p.payment_status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <div className="rounded-xl border border-ink-200/70 p-3.5">
+                <p className="text-[11px] font-semibold text-ink-600 mb-2">① 直接出库</p>
+                <Select
+                  value={flowWh}
+                  onChange={setFlowWh}
+                  options={flow.warehouses.map((w) => ({ value: w.warehouse, label: w.warehouse }))}
+                  placeholder="FBA-US"
+                />
+                <p className="text-[10.5px] text-ink-400 mt-1.5">选择有货的海外仓，出库后成本自动回流利润</p>
+              </div>
+              <div className="rounded-xl border border-ink-200/70 p-3.5">
+                <p className="text-[11px] font-semibold text-ink-600 mb-2">② 公司仓 → 海外仓调拨</p>
+                <div className="flex gap-2">
+                  <input
+                    className="input num w-20"
+                    value={transferQty}
+                    onChange={(e) => setTransferQty(e.target.value)}
+                    placeholder="数量"
+                  />
+                  <Select
+                    value={transferTo}
+                    onChange={setTransferTo}
+                    options={['FBA-US', 'FBA-UK', 'FBA-DE', 'FBA-JP', 'US-3PL', 'UK-3PL'].map((w) => ({ value: w, label: w }))}
+                  />
+                </div>
+                <Button className="mt-2 w-full" loading={flowBusy} onClick={handleTransfer}>
+                  创建调拨单
+                </Button>
+              </div>
+              <div className="rounded-xl border border-ink-200/70 p-3.5">
+                <p className="text-[11px] font-semibold text-ink-600 mb-2">③ 缺货 → 找供应商采购</p>
+                <p className="text-[10.5px] text-ink-400 mb-2">
+                  生成采购单后由财务审核付款，到货入公司仓，再走上面的调拨
+                </p>
+                <Button variant="primary" className="w-full" disabled={!canBuy} onClick={openFlowPurchase}>
+                  生成采购单
+                </Button>
+                {!canBuy && <p className="text-[10.5px] text-rose-500 mt-1.5">需要采购编辑权限</p>}
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       {/* 缺货：订单驱动补货 */}
       <Modal

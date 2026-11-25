@@ -1,5 +1,5 @@
 import { callRpc } from './db'
-import type { ShortageRow, TraceEvent } from './types'
+import type { OrderFlow, ShortageRow, TraceEvent } from './types'
 
 /* ------------------------------------------------------------------ */
 /*  链路操作：所有涉及库存 / 成本 / 状态的写入都走数据库函数           */
@@ -106,6 +106,7 @@ export function createPoFromShortage(
   supplierId?: string | null,
   storeId?: string | null,
   orderId?: string | null,
+  warehouse?: string | null,
 ) {
   return callRpc<{ ok: boolean; po_id: string; po_no: string; lines: number; amount: number }>(
     'create_po_from_shortage',
@@ -114,8 +115,46 @@ export function createPoFromShortage(
       p_supplier_id: supplierId ?? null,
       p_store_id: storeId ?? null,
       p_order_id: orderId ?? null,
+      p_warehouse: warehouse ?? null,
     },
   )
+}
+
+/** 国内仓 → 海外仓调拨：创建即从来源仓扣货，防止超卖 */
+export function createStockTransfer(
+  orderId: string,
+  qty: number,
+  fromWarehouse = '国内仓',
+  toWarehouse = 'FBA-US',
+  note?: string,
+) {
+  return callRpc<{
+    ok: boolean
+    reason?: string
+    available?: number
+    transfer_id?: string
+    transfer_no?: string
+    qty?: number
+  }>('create_stock_transfer', {
+    p_order_id: orderId,
+    p_qty: qty,
+    p_from_warehouse: fromWarehouse,
+    p_to_warehouse: toWarehouse,
+    p_note: note ?? null,
+  })
+}
+
+/** 调拨到货确认：写入目标仓并更新调拨单状态 */
+export function receiveStockTransfer(transferId: string, qty?: number | null, note?: string) {
+  return callRpc<{ ok: boolean; reason?: string; already?: boolean; received?: number; status?: string }>(
+    'receive_stock_transfer',
+    { p_transfer_id: transferId, p_qty: qty ?? null, p_note: note ?? null },
+  )
+}
+
+/** 订单履约全景：海外仓 / 国内仓库存、在途、采购审批与付款 */
+export function fetchOrderFlow(orderId: string) {
+  return callRpc<OrderFlow>('order_flow', { p_order_id: orderId })
 }
 
 /** 一张订单的完整链路时间线 */
@@ -161,6 +200,8 @@ export function applyPerformanceScore(profileId: string, period: string) {
 export const MOVE_META: Record<string, { label: string; cls: string }> = {
   in: { label: '入库', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
   out: { label: '出库', cls: 'bg-rose-50 text-rose-700 border-rose-200/70' },
+  transfer_out: { label: '调出', cls: 'bg-orange-50 text-orange-700 border-orange-200/70' },
+  transfer_in: { label: '调入', cls: 'bg-teal-50 text-teal-700 border-teal-200/70' },
   return: { label: '退回', cls: 'bg-brand-50 text-brand-700 border-brand-200/70' },
   adjust: { label: '盘点', cls: 'bg-amber-50 text-amber-700 border-amber-200/70' },
 }
@@ -171,6 +212,8 @@ export const TRACE_META: Record<string, { label: string; dot: string; cls: strin
   purchase: { label: '采购', dot: 'bg-amber-500', cls: 'text-amber-700' },
   payment: { label: '付款', dot: 'bg-violet-500', cls: 'text-violet-700' },
   in: { label: '入库', dot: 'bg-emerald-500', cls: 'text-emerald-700' },
+  transfer: { label: '调拨', dot: 'bg-orange-500', cls: 'text-orange-700' },
+  audit: { label: '财务', dot: 'bg-violet-500', cls: 'text-violet-700' },
   task: { label: '任务', dot: 'bg-ink-400', cls: 'text-ink-600' },
 }
 
@@ -178,6 +221,16 @@ export const STOCK_STATE_META: Record<string, { label: string; cls: string }> = 
   pending: { label: '未出库', cls: 'bg-ink-100 text-ink-600 border-ink-200/70' },
   out: { label: '已出库', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
   returned: { label: '已退回', cls: 'bg-amber-50 text-amber-700 border-amber-200/70' },
+}
+
+export const FLOW_STAGE_META: Record<string, { label: string; cls: string }> = {
+  fulfilled: { label: '已闭环', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200/70' },
+  ready: { label: '可出库', cls: 'bg-teal-50 text-teal-700 border-teal-200/70' },
+  in_transit: { label: '调拨在途', cls: 'bg-orange-50 text-orange-700 border-orange-200/70' },
+  pending_audit: { label: '待财务审核', cls: 'bg-amber-50 text-amber-700 border-amber-200/70' },
+  rejected: { label: '财务驳回', cls: 'bg-rose-50 text-rose-700 border-rose-200/70' },
+  purchasing: { label: '采购在途', cls: 'bg-violet-50 text-violet-700 border-violet-200/70' },
+  shortage: { label: '缺货待处理', cls: 'bg-rose-50 text-rose-700 border-rose-200/70' },
 }
 
 export const PAYMENT_META: Record<string, { label: string; cls: string }> = {

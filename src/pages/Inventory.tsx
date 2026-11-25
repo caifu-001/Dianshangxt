@@ -15,8 +15,8 @@ import {
 import dayjs from 'dayjs'
 import { deleteRow, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
 import { useAuth } from '../context/AuthContext'
-import { MOVE_META, createPoFromShortage, fetchShortagePlan } from '../lib/flow'
-import type { InventoryItem, Product, ShortageRow, StockMovement, Store, Supplier } from '../lib/types'
+import { MOVE_META, createPoFromShortage, fetchShortagePlan, receiveStockTransfer } from '../lib/flow'
+import type { InventoryItem, Product, ShortageRow, StockMovement, StockTransfer, Store, Supplier } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
   Badge,
@@ -104,18 +104,23 @@ export default function Inventory() {
   const [creatingTasks, setCreatingTasks] = useState(false)
 
   // 视图：库存盘点 / 出入库流水 / 补货建议
-  const [view, setView] = useState<'stock' | 'moves' | 'replenish'>('stock')
+  const [view, setView] = useState<'stock' | 'moves' | 'transfers' | 'replenish'>('stock')
   const [moveSearch, setMoveSearch] = useState('')
   const [moveType, setMoveType] = useState('')
   const [picked, setPicked] = useState<string[]>([])
   const [poSupplier, setPoSupplier] = useState('')
   const [poCreating, setPoCreating] = useState(false)
+  const [receiving, setReceiving] = useState<StockTransfer | null>(null)
+  const [receiveQty, setReceiveQty] = useState('')
+  const [receiveNote, setReceiveNote] = useState('')
+  const [receiveBusy, setReceiveBusy] = useState(false)
 
   const { can } = useAuth()
   const canBuy = can('purchase.edit')
+  const canStock = can('inventory.edit')
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [inventory, stores, products, movements, shortage, suppliers] = await Promise.all([
+    const [inventory, stores, products, movements, transfers, shortage, suppliers] = await Promise.all([
       fetchRows<InventoryItem>('inventory', { order: { column: 'updated_at', ascending: false } }),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
       fetchRows<Product>('products'),
@@ -124,10 +129,14 @@ export default function Inventory() {
         order: { column: 'created_at', ascending: false },
         limit: 500,
       }).catch(() => [] as StockMovement[]),
+      fetchRows<StockTransfer>('stock_transfers', {
+        order: { column: 'created_at', ascending: false },
+        limit: 300,
+      }).catch(() => [] as StockTransfer[]),
       fetchShortagePlan(null).catch(() => [] as ShortageRow[]),
       fetchRows<Supplier>('suppliers', { filters: [['status', 'eq', 'active']] }).catch(() => [] as Supplier[]),
     ])
-    return { inventory, stores, products, movements, shortage, suppliers }
+    return { inventory, stores, products, movements, transfers, shortage, suppliers }
   }, [])
 
   const storeMap = useMemo(() => new Map((data?.stores ?? []).map((s) => [s.id, s])), [data])
@@ -365,6 +374,31 @@ export default function Inventory() {
     }
   }
 
+  function openReceive(t: StockTransfer) {
+    setReceiving(t)
+    setReceiveQty(String(Math.max(1, t.qty - t.received_qty)))
+    setReceiveNote('')
+  }
+
+  async function handleReceive() {
+    if (!receiving) return
+    const qty = Math.max(1, Math.round(Number(receiveQty) || 0))
+    if (qty > receiving.qty - receiving.received_qty)
+      return push(`最多还能收 ${num(receiving.qty - receiving.received_qty)} 件`, 'error')
+    setReceiveBusy(true)
+    try {
+      const res = await receiveStockTransfer(receiving.id, qty, receiveNote.trim() || undefined)
+      if (!res?.ok && !res?.already) throw new Error(res?.reason ?? '到货确认失败')
+      push(`已确认到货 ${num(res.received ?? qty)} 件，目标仓库存已更新`)
+      setReceiving(null)
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '到货确认失败', 'error')
+    } finally {
+      setReceiveBusy(false)
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -390,6 +424,10 @@ export default function Inventory() {
           options={[
             { value: 'stock', label: '库存盘点' },
             { value: 'moves', label: `出入库流水 ${data?.movements?.length ?? 0}` },
+            {
+              value: 'transfers',
+              label: `在途调拨 ${(data?.transfers ?? []).filter((t) => t.status !== 'received' && t.status !== 'cancelled').length}`,
+            },
             { value: 'replenish', label: `补货建议 ${shortageRows.length}` },
           ]}
         />
@@ -621,6 +659,74 @@ export default function Inventory() {
         </div>
       )}
 
+      {view === 'transfers' && (
+        <div className="card overflow-hidden">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-ink-100">
+            <div className="flex-1 min-w-[220px]">
+              <p className="text-[12px] font-medium text-ink-800">公司国内仓 → 海外仓调拨（头程）</p>
+              <p className="text-[11px] text-ink-400 mt-0.5">
+                创建时即从来源仓扣货；确认到货后写入目标仓，订单履约中心会显示「调拨在途」
+              </p>
+            </div>
+          </div>
+          {(data?.transfers ?? []).length === 0 ? (
+            <EmptyState
+              icon={<Truck className="w-5 h-5" />}
+              title="暂无调拨单"
+              description="在订单列表点「履约中心」，把国内仓库存调到海外仓即可跟踪在途。"
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead className="bg-ink-50/70 text-ink-500">
+                  <tr>
+                    <th className="th text-left">调拨单</th>
+                    <th className="th text-left">商品</th>
+                    <th className="th text-left">路线</th>
+                    <th className="th text-right">数量</th>
+                    <th className="th text-left">状态</th>
+                    <th className="th text-left">创建时间</th>
+                    <th className="th text-right">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data?.transfers ?? []).map((t) => (
+                    <tr key={t.id} className="border-t border-ink-100 hover:bg-ink-50/60">
+                      <td className="td font-mono text-ink-700">{t.transfer_no}</td>
+                      <td className="td">
+                        <p className="text-ink-700 truncate max-w-[180px]">{t.title ?? t.sku}</p>
+                        <p className="text-[10.5px] text-ink-400 font-mono">{t.sku}</p>
+                      </td>
+                      <td className="td text-ink-600">
+                        {t.from_warehouse} → {t.to_warehouse}
+                      </td>
+                      <td className="td text-right num">{num(t.qty)}（已收 {num(t.received_qty)}）</td>
+                      <td className="td">
+                        <Badge
+                          tone={
+                            t.status === 'received' ? 'green' : t.status === 'cancelled' ? 'gray' : 'amber'
+                          }
+                        >
+                          {{ in_transit: '在途', partial: '部分到货', received: '已到货', cancelled: '已取消' }[t.status] ?? t.status}
+                        </Badge>
+                      </td>
+                      <td className="td text-ink-500 num">{dayjs(t.created_at).format('MM-DD HH:mm')}</td>
+                      <td className="td text-right">
+                        {canStock && t.status !== 'received' && t.status !== 'cancelled' && (
+                          <Button size="sm" icon={<PackageCheck className="w-3.5 h-3.5" />} onClick={() => openReceive(t)}>
+                            确认到货
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {view === 'replenish' && (
         <div className="card overflow-hidden">
           <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-ink-100">
@@ -797,6 +903,51 @@ export default function Inventory() {
         title="删除库存记录"
         message={`确定删除 ${deleting?.sku} 在 ${deleting?.warehouse} 的库存记录吗？`}
       />
+
+      {/* 调拨到货确认 */}
+      <Modal
+        open={!!receiving}
+        onClose={() => setReceiving(null)}
+        title="确认调拨到货"
+        description={receiving ? `${receiving.transfer_no} · ${receiving.from_warehouse} → ${receiving.to_warehouse}` : undefined}
+        width="max-w-md"
+        footer={
+          <>
+            <Button onClick={() => setReceiving(null)}>取消</Button>
+            <Button variant="primary" loading={receiveBusy} onClick={handleReceive}>
+              确认到货
+            </Button>
+          </>
+        }
+      >
+        {receiving && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-ink-200 bg-ink-50/60 px-3 py-2 text-[11.5px] text-ink-600">
+              {receiving.sku} · 共 {num(receiving.qty)} 件，已收 {num(receiving.received_qty)} 件，
+              还可收 <b className="text-ink-900">{num(receiving.qty - receiving.received_qty)}</b> 件
+            </div>
+            <Field label="本次到货数量">
+              <input
+                className="input num"
+                type="number"
+                value={receiveQty}
+                onChange={(e) => setReceiveQty(e.target.value)}
+              />
+            </Field>
+            <Field label="备注">
+              <input
+                className="input"
+                value={receiveNote}
+                placeholder="如：首批到货，尾款待付"
+                onChange={(e) => setReceiveNote(e.target.value)}
+              />
+            </Field>
+            <p className="text-[10.5px] text-ink-400">
+              确认后写入「transfer_in」库存流水，目标仓库存立即增加；订单履约中心可继续出库。
+            </p>
+          </div>
+        )}
+      </Modal>
     </>
   )
 }

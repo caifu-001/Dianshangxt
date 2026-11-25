@@ -802,6 +802,50 @@ create index if not exists idx_moves_ref  on public.stock_movements(ref_type, re
 create index if not exists idx_moves_time on public.stock_movements(created_at desc);
 create index if not exists idx_moves_owner on public.stock_movements(owner_id);
 
+-- -------------------------------------------------------------
+-- 库存调拨（头程）：国内仓 → 海外仓，把「订单缺货」接到采购与出库之间
+--   创建调拨时即从来源仓扣货（in_transit），到货确认时写入目标仓；
+--   一张调拨可关联订单，出库后订单时间线能看到完整轨迹。
+-- -------------------------------------------------------------
+create table if not exists public.stock_transfers (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  transfer_no    text not null,
+  store_id       uuid references public.stores(id) on delete set null,
+  order_id       uuid references public.orders(id) on delete set null,
+  product_id     uuid references public.products(id) on delete set null,
+  sku            text not null,
+  title          text,
+  qty            integer not null check (qty > 0),
+  from_warehouse text not null default '国内仓',
+  to_warehouse   text not null default 'FBA-US',
+  status         text not null default 'in_transit',
+  received_qty   integer not null default 0,
+  shipped_at     timestamptz,
+  received_at    timestamptz,
+  owner_id       uuid references public.profiles(id) on delete set null,
+  note           text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+create unique index if not exists uq_stock_transfers_no on public.stock_transfers(transfer_no);
+create index if not exists idx_stock_transfers_order  on public.stock_transfers(order_id);
+create index if not exists idx_stock_transfers_status on public.stock_transfers(status, created_at desc);
+create index if not exists idx_stock_transfers_sku    on public.stock_transfers(sku);
+do $$ begin
+  alter table public.stock_transfers drop constraint if exists stock_transfers_status_chk;
+  alter table public.stock_transfers add constraint stock_transfers_status_chk
+    check (status in ('in_transit', 'partial', 'received', 'cancelled'));
+
+  -- 流水类型扩展：调拨出 / 调拨入
+  alter table public.stock_movements drop constraint if exists stock_movements_move_type_check;
+  alter table public.stock_movements add constraint stock_movements_move_type_check
+    check (move_type in ('in', 'out', 'adjust', 'return', 'transfer_out', 'transfer_in'));
+  alter table public.stock_movements drop constraint if exists stock_movements_ref_type_check;
+  alter table public.stock_movements add constraint stock_movements_ref_type_check
+    check (ref_type in ('order', 'purchase', 'manual', 'transfer'));
+end $$;
+
 -- 采购付款：一张采购单可以分多次付款
 create table if not exists public.purchase_payments (
   id         uuid primary key default gen_random_uuid(),
@@ -1051,7 +1095,7 @@ declare
     'campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
     'departments','positions','roles','access_requests','employee_events',
-    'performance_reviews','stock_movements','purchase_payments','purchase_approvals',
+    'performance_reviews','stock_movements','stock_transfers','purchase_payments','purchase_approvals',
     'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics',
     'dev_projects','dev_milestones','dev_costs'
   ];
@@ -1174,6 +1218,7 @@ begin
       ('purchase_items',       'purchase'),
       ('purchase_payments',    'purchase'),
       ('stock_movements',      'inventory'),
+      ('stock_transfers',      'inventory'),
       ('supplier_products',    'purchase'),
       ('supplier_contacts',    'purchase'),
       ('purchase_approvals',   'purchase'),
@@ -1403,7 +1448,7 @@ declare
   tabs  text[] := array[
     'stores','products','orders','inventory','campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','supplier_products','purchase_orders','purchase_items',
-    'brand_social_accounts','brand_influencers','brand_pr_contacts'
+    'stock_movements','stock_transfers','brand_social_accounts','brand_influencers','brand_pr_contacts'
   ];
 begin
   if not (public.is_staff() or public.has_permission('hr.manage')) then
@@ -2110,11 +2155,18 @@ begin
      group by i.sku, i.store_id
   ),
   po as (
-    select pi.sku, p.store_id, sum(pi.quantity - pi.received_qty)::bigint as inbound_po
-      from public.purchase_items pi
-      join public.purchase_orders p on p.id = pi.po_id
-     where p.status in ('ordered', 'partial')
-     group by pi.sku, p.store_id
+    select u.sku, u.store_id, sum(u.inbound_po)::bigint as inbound_po
+      from (
+        select pi.sku, p.store_id, (pi.quantity - pi.received_qty)::bigint as inbound_po
+          from public.purchase_items pi
+          join public.purchase_orders p on p.id = pi.po_id
+         where p.status in ('ordered', 'partial')
+        union all
+        select tr.sku, tr.store_id, (tr.qty - tr.received_qty)::bigint
+          from public.stock_transfers tr
+         where tr.status in ('in_transit', 'partial') and tr.store_id is not null
+      ) u
+     group by u.sku, u.store_id
   ),
   merged as (
     select coalesce(s.sku, i.sku)                  as sku,
@@ -2148,7 +2200,8 @@ create or replace function public.create_po_from_shortage(
   p_lines       jsonb,                -- [{sku,title,product_id,qty,unit_cost}]
   p_supplier_id uuid default null,
   p_store_id    uuid default null,
-  p_order_id    uuid default null
+  p_order_id    uuid default null,
+  p_warehouse   text default null
 ) returns jsonb
 language plpgsql security definer set search_path = public
 as $$
@@ -2186,7 +2239,8 @@ begin
     (user_id, po_no, supplier_id, store_id, warehouse, order_date, expected_date,
      status, source, source_order_id, buyer_id)
   values
-    (auth.uid(), v_po_no, p_supplier_id, p_store_id, '国内仓',
+    (auth.uid(), v_po_no, p_supplier_id, p_store_id,
+     coalesce(nullif(btrim(coalesce(p_warehouse, '')), ''), '国内仓'),
      current_date, current_date + coalesce(v_lead, 30), 'draft',
      case when p_order_id is null then 'shortage' else 'order' end,
      p_order_id, auth.uid())
@@ -2267,6 +2321,24 @@ begin
       join public.purchase_orders p on p.id = m.ref_id
      where m.ref_type = 'purchase' and p.source_order_id = p_order_id
     union all
+    select tr.created_at, 'transfer', '仓库调拨',
+           concat(tr.transfer_no, ' · ', tr.from_warehouse, ' → ', tr.to_warehouse,
+                  ' · ', tr.qty, ' 件 · ', tr.status),
+           tr.transfer_no, tr.owner_id
+      from public.stock_transfers tr
+     where tr.order_id = p_order_id
+    union all
+    select a.created_at, 'audit',
+           case a.action when 'approve' then '财务审核通过'
+                         when 'reject' then '财务驳回'
+                         when 'revoke' then '撤回财务审核'
+                         else '提交财务审核' end,
+           coalesce(nullif(btrim(coalesce(a.note, '')), ''), '—'),
+           (select po_no from public.purchase_orders where id = a.po_id), a.user_id
+      from public.purchase_approvals a
+      join public.purchase_orders p on p.id = a.po_id
+     where p.source_order_id = p_order_id
+    union all
     select t.created_at, 'task', '关联任务',
            concat(t.title, ' · ', t.status), t.ref_no, t.owner_id
       from public.tasks t
@@ -2274,6 +2346,222 @@ begin
   ) x;
 
   return jsonb_build_object('order', to_jsonb(v_order), 'timeline', v_result);
+end;
+$$;
+
+-- ---------- 国内仓 → 海外仓调拨：创建时即锁库存，避免超卖 ----------
+create or replace function public.create_stock_transfer(
+  p_order_id       uuid,
+  p_qty            integer,
+  p_from_warehouse text default '国内仓',
+  p_to_warehouse   text default 'FBA-US',
+  p_note           text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  o       record;
+  v_qty   integer;
+  v_avail bigint;
+  v_no    text;
+  v_seq   integer;
+  v_id    uuid;
+begin
+  if not (public.has_permission('orders.edit') or public.has_permission('inventory.edit')) then
+    raise exception '没有订单或库存编辑权限';
+  end if;
+  if coalesce(nullif(btrim(coalesce(p_from_warehouse, '')), ''), '国内仓')
+     = coalesce(nullif(btrim(coalesce(p_to_warehouse, '')), ''), 'FBA-US') then
+    raise exception '调出仓与调入仓不能相同';
+  end if;
+
+  select * into o from public.orders where id = p_order_id for update;
+  if not found then raise exception '订单不存在'; end if;
+  if o.stock_state = 'out' then raise exception '订单已出库，无需调拨'; end if;
+  if o.status in ('cancelled', 'refunded') then raise exception '取消或退款订单不能调拨'; end if;
+
+  v_qty := greatest(1, coalesce(p_qty, 0));
+  select coalesce(sum(available_qty), 0) into v_avail
+    from public.inventory
+   where store_id = o.store_id and sku = o.sku
+     and warehouse = coalesce(nullif(btrim(coalesce(p_from_warehouse, '')), ''), '国内仓');
+  if v_qty > v_avail then
+    return jsonb_build_object('ok', false, 'reason', 'shortage',
+                              'available', v_avail, 'need', v_qty);
+  end if;
+
+  v_no := 'TR' || to_char(current_date, 'YYYYMMDD') || '-';
+  select coalesce(max(substring(transfer_no from '([0-9]+)$')::integer), 0) + 1
+    into v_seq from public.stock_transfers where transfer_no like v_no || '%';
+  v_no := v_no || lpad(v_seq::text, 3, '0');
+
+  insert into public.stock_transfers
+    (user_id, transfer_no, store_id, order_id, product_id, sku, title, qty,
+     from_warehouse, to_warehouse, shipped_at, owner_id, note)
+  values
+    (auth.uid(), v_no, o.store_id, o.id, o.product_id, o.sku, o.title, v_qty,
+     coalesce(nullif(btrim(coalesce(p_from_warehouse, '')), ''), '国内仓'),
+     coalesce(nullif(btrim(coalesce(p_to_warehouse, '')), ''), 'FBA-US'),
+     now(), coalesce(o.owner_id, auth.uid()), p_note)
+  returning id into v_id;
+
+  insert into public.stock_movements
+    (user_id, store_id, product_id, sku, title, warehouse, move_type, qty, unit_cost,
+     ref_type, ref_id, ref_no, owner_id, note)
+  values
+    (auth.uid(), o.store_id, o.product_id, o.sku, o.title,
+     coalesce(nullif(btrim(coalesce(p_from_warehouse, '')), ''), '国内仓'),
+     'transfer_out', -v_qty, public.sku_avg_cost(o.sku),
+     'transfer', v_id, v_no, coalesce(o.owner_id, auth.uid()),
+     coalesce(nullif(btrim(coalesce(p_note, '')), ''), '调拨出库'));
+
+  perform public.bump_inventory(
+    o.store_id, o.product_id, o.sku,
+    coalesce(nullif(btrim(coalesce(p_from_warehouse, '')), ''), '国内仓'),
+    -v_qty, o.title);
+
+  return jsonb_build_object('ok', true, 'transfer_id', v_id, 'transfer_no', v_no, 'qty', v_qty);
+end;
+$$;
+
+-- ---------- 调拨到货：写流水 + 加目标仓库存 + 更新单据状态 ----------
+create or replace function public.receive_stock_transfer(
+  p_transfer_id uuid,
+  p_qty         integer default null,
+  p_note        text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  t       record;
+  v_qty   integer;
+  v_left  integer;
+  v_done  boolean;
+begin
+  if not public.has_permission('inventory.edit') then
+    raise exception '没有库存编辑权限';
+  end if;
+
+  select * into t from public.stock_transfers where id = p_transfer_id for update;
+  if not found then raise exception '调拨单不存在'; end if;
+  if t.status = 'received' then
+    return jsonb_build_object('ok', true, 'already', true, 'received', t.received_qty);
+  end if;
+  if t.status = 'cancelled' then raise exception '已取消的调拨单不能到货'; end if;
+
+  v_left := greatest(0, t.qty - t.received_qty);
+  v_qty  := least(v_left, greatest(1, coalesce(p_qty, v_left)));
+  if v_qty <= 0 then
+    return jsonb_build_object('ok', false, 'reason', 'empty', 'message', '没有可到货的数量');
+  end if;
+
+  insert into public.stock_movements
+    (user_id, store_id, product_id, sku, title, warehouse, move_type, qty, unit_cost,
+     ref_type, ref_id, ref_no, owner_id, note)
+  values
+    (auth.uid(), t.store_id, t.product_id, t.sku, t.title, t.to_warehouse,
+     'transfer_in', v_qty, public.sku_avg_cost(t.sku),
+     'transfer', t.id, t.transfer_no, coalesce(t.owner_id, auth.uid()),
+     coalesce(nullif(btrim(coalesce(p_note, '')), ''), '调拨到货'));
+
+  perform public.bump_inventory(t.store_id, t.product_id, t.sku, t.to_warehouse, v_qty, t.title);
+
+  update public.stock_transfers
+     set received_qty = t.received_qty + v_qty,
+         status       = case when t.received_qty + v_qty >= t.qty then 'received' else 'partial' end,
+         received_at  = case when t.received_qty + v_qty >= t.qty then now() else t.received_at end,
+         updated_at   = now()
+   where id = t.id;
+
+  select t.received_qty + v_qty >= t.qty into v_done;
+  return jsonb_build_object('ok', true, 'received', v_qty,
+                            'status', case when v_done then 'received' else 'partial' end);
+end;
+$$;
+
+-- ---------- 订单履约全景：双仓库存 / 在途 / 采购审批付款状态 ----------
+create or replace function public.order_flow(p_order_id uuid)
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  o           record;
+  v_warehouse jsonb;
+  v_transfer  jsonb;
+  v_po        jsonb;
+  v_stage     text;
+  v_advice    text;
+  v_need      integer;
+begin
+  if not public.has_permission('orders.view') then
+    raise exception '没有订单查看权限';
+  end if;
+  select * into o from public.orders where id = p_order_id;
+  if not found then raise exception '订单不存在'; end if;
+  v_need := greatest(1, o.quantity);
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'warehouse', i.warehouse, 'available', i.available_qty, 'inbound', i.inbound_qty
+         ) order by i.warehouse), '[]'::jsonb)
+    into v_warehouse
+    from public.inventory i
+   where i.store_id = o.store_id and i.sku = o.sku;
+
+  select coalesce(jsonb_agg(row_to_json(tr)::jsonb order by tr.created_at), '[]'::jsonb)
+    into v_transfer
+    from public.stock_transfers tr
+   where tr.order_id = o.id;
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'id', p.id, 'po_no', p.po_no, 'status', p.status,
+           'approval_status', p.approval_status, 'payment_status', p.payment_status,
+           'supplier', (select name from public.suppliers where id = p.supplier_id),
+           'qty', (select coalesce(sum(quantity), 0) from public.purchase_items where po_id = p.id),
+           'received_qty', (select coalesce(sum(received_qty), 0) from public.purchase_items where po_id = p.id),
+           'expected_date', p.expected_date
+         ) order by p.created_at), '[]'::jsonb)
+    into v_po
+    from public.purchase_orders p
+   where p.source_order_id = o.id;
+
+  if o.stock_state = 'out' then
+    v_stage := 'fulfilled';
+    v_advice := '已出库，利润与绩效数据已归集';
+  elsif exists (select 1 from public.stock_transfers tr
+                 where tr.order_id = o.id and tr.status in ('in_transit', 'partial')) then
+    v_stage := 'in_transit';
+    v_advice := '头程调拨在途，到货确认后即可出库';
+  elsif exists (select 1 from public.purchase_orders p
+                 where p.source_order_id = o.id and p.status not in ('received', 'cancelled')) then
+    if exists (select 1 from public.purchase_orders p
+                where p.source_order_id = o.id and p.approval_status = 'pending') then
+      v_stage := 'pending_audit';
+      v_advice := '采购单待财务审核，通过后才能付款';
+    elsif exists (select 1 from public.purchase_orders p
+                   where p.source_order_id = o.id and p.approval_status = 'rejected') then
+      v_stage := 'rejected';
+      v_advice := '采购单被财务驳回，请修改后重新提交';
+    else
+      v_stage := 'purchasing';
+      v_advice := '采购已通过审核，等待付款与到货入库';
+    end if;
+  elsif exists (select 1 from public.inventory i
+                 where i.store_id = o.store_id and i.sku = o.sku
+                   and i.warehouse = coalesce(o.fulfillment_wh, 'FBA-US')
+                   and i.available_qty >= v_need) then
+    v_stage := 'ready';
+    v_advice := '海外仓库存充足，可直接出库';
+  else
+    v_stage := 'shortage';
+    v_advice := '海外仓缺货：先看国内仓能否调拨，不足再生成采购单';
+  end if;
+
+  return jsonb_build_object(
+    'order_id', o.id, 'order_no', o.order_no, 'sku', o.sku, 'title', o.title,
+    'quantity', v_need, 'stock_state', o.stock_state,
+    'fulfillment_wh', coalesce(o.fulfillment_wh, 'FBA-US'),
+    'stage', v_stage, 'advice', v_advice,
+    'warehouses', v_warehouse, 'transfers', v_transfer, 'pos', v_po);
 end;
 $$;
 
@@ -2459,7 +2747,7 @@ grant select, insert, update, delete on
   public.brand_pr_contacts, public.brand_metrics,
   public.departments, public.positions, public.roles,
   public.access_requests, public.employee_events, public.performance_reviews,
-  public.stock_movements, public.purchase_payments
+  public.stock_movements, public.stock_transfers, public.purchase_payments
   to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
@@ -2481,8 +2769,11 @@ grant execute on function public.approve_purchase(uuid, text, text)             
 grant execute on function public.register_payment(uuid, numeric, date, text, text, text) to authenticated;
 grant execute on function public.receive_purchase(uuid, jsonb, text, text)   to authenticated;
 grant execute on function public.shortage_plan(uuid)                         to authenticated;
-grant execute on function public.create_po_from_shortage(jsonb, uuid, uuid, uuid) to authenticated;
+grant execute on function public.create_po_from_shortage(jsonb, uuid, uuid, uuid, text) to authenticated;
 grant execute on function public.order_trace(uuid)                           to authenticated;
+grant execute on function public.order_flow(uuid)                            to authenticated;
+grant execute on function public.create_stock_transfer(uuid, integer, text, text, text) to authenticated;
+grant execute on function public.receive_stock_transfer(uuid, integer, text) to authenticated;
 grant execute on function public.member_metrics(uuid, text)                  to authenticated;
 grant execute on function public.apply_performance_score(uuid, text)         to authenticated;
 

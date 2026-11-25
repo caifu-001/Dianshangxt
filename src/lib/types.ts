@@ -218,6 +218,55 @@ export interface InventoryItem {
   updated_at: string
 }
 
+/** 库存调拨（头程）：国内仓 → 海外仓 */
+export interface StockTransfer {
+  id: string
+  user_id: string
+  transfer_no: string
+  store_id: string | null
+  order_id: string | null
+  product_id: string | null
+  sku: string
+  title: string | null
+  qty: number
+  from_warehouse: string
+  to_warehouse: string
+  status: 'in_transit' | 'partial' | 'received' | 'cancelled'
+  received_qty: number
+  shipped_at: string | null
+  received_at: string | null
+  owner_id: string | null
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 订单履约全景（order_flow RPC） */
+export interface OrderFlow {
+  order_id: string
+  order_no: string
+  sku: string | null
+  title: string | null
+  quantity: number
+  stock_state: string
+  fulfillment_wh: string
+  stage: 'fulfilled' | 'in_transit' | 'pending_audit' | 'rejected' | 'purchasing' | 'ready' | 'shortage'
+  advice: string
+  warehouses: Array<{ warehouse: string; available: number; inbound: number }>
+  transfers: StockTransfer[]
+  pos: Array<{
+    id: string
+    po_no: string
+    status: string
+    approval_status: string
+    payment_status: string
+    supplier: string | null
+    qty: number
+    received_qty: number
+    expected_date: string | null
+  }>
+}
+
 export interface Campaign {
   id: string
   user_id: string
@@ -510,7 +559,7 @@ export interface ShortageRow {
 /** 单据链路时间线（order_trace 返回） */
 export interface TraceEvent {
   ts: string
-  kind: 'order' | 'out' | 'purchase' | 'payment' | 'in' | 'task'
+  kind: 'order' | 'out' | 'purchase' | 'payment' | 'in' | 'task' | 'transfer' | 'audit'
   title: string
   detail: string | null
   ref_no: string | null

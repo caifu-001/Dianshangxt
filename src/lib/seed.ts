@@ -566,6 +566,82 @@ export async function seedDemoData() {
     // 采购表还没建：跳过
   }
 
+  // 11b. 履约链路演示：国内仓 → 海外仓调拨（在途 + 已到货各一张）
+  try {
+    const latestOrders = await fetchRows<{
+      id: string
+      store_id: string
+      product_id: string | null
+      sku: string | null
+      title: string | null
+    }>('orders', { order: { column: 'created_at', ascending: false }, limit: 3 })
+    const prefix = `TR${dayjs().format('YYYYMMDD')}-`
+    if (latestOrders.length > 0) {
+      const o = latestOrders[0]
+      await insertRows('stock_transfers', [
+        {
+          user_id: ownerId,
+          transfer_no: `${prefix}001`,
+          store_id: o.store_id,
+          order_id: o.id,
+          product_id: o.product_id,
+          sku: o.sku ?? products[0].sku,
+          title: o.title ?? products[0].title,
+          qty: 120,
+          from_warehouse: '国内仓',
+          to_warehouse: 'FBA-US',
+          status: 'in_transit',
+          received_qty: 0,
+          shipped_at: new Date().toISOString(),
+          owner_id: ownerId,
+          note: '演示：首批头程在途',
+        },
+      ])
+      await insertRows('stock_movements', [
+        {
+          user_id: ownerId,
+          store_id: o.store_id,
+          product_id: o.product_id,
+          sku: o.sku ?? products[0].sku,
+          title: o.title ?? products[0].title,
+          warehouse: '国内仓',
+          move_type: 'transfer_out',
+          qty: -120,
+          unit_cost: products[0].cost_price,
+          ref_type: 'transfer',
+          ref_no: `${prefix}001`,
+          owner_id: ownerId,
+          note: '演示调拨出库',
+        },
+      ])
+    }
+    if (latestOrders.length > 1) {
+      const o = latestOrders[1]
+      await insertRows('stock_transfers', [
+        {
+          user_id: ownerId,
+          transfer_no: `${prefix}002`,
+          store_id: o.store_id,
+          order_id: o.id,
+          product_id: o.product_id,
+          sku: o.sku ?? products[1].sku,
+          title: o.title ?? products[1].title,
+          qty: 80,
+          from_warehouse: '国内仓',
+          to_warehouse: 'US-3PL',
+          status: 'received',
+          received_qty: 80,
+          shipped_at: new Date().toISOString(),
+          received_at: new Date().toISOString(),
+          owner_id: ownerId,
+          note: '演示：已到货，可在履约中心出库',
+        },
+      ])
+    }
+  } catch {
+    // 旧库还没有调拨表：跳过
+  }
+
   // 12. 自有品牌产品开发：3 个项目 + 阶段节点 + 开发费用
   try {
     const devRows = await insertRows<{ id: string }>('dev_projects', [

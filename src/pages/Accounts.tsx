@@ -9,6 +9,7 @@ import {
   EyeOff,
   KeyRound,
   Network,
+  Pencil,
   ShieldCheck,
   UserCheck,
   UserCog,
@@ -60,6 +61,8 @@ const RESOURCE_TABLES: Array<{ table: string; label: string }> = [
   { table: 'products', label: '商品' },
   { table: 'orders', label: '订单' },
   { table: 'inventory', label: '库存' },
+  { table: 'stock_movements', label: '库存流水' },
+  { table: 'stock_transfers', label: '在途调拨' },
   { table: 'campaigns', label: '广告活动' },
   { table: 'creators', label: '达人' },
   { table: 'tasks', label: '任务' },
@@ -74,7 +77,7 @@ const RESOURCE_TABLES: Array<{ table: string; label: string }> = [
 
 interface OrgForm {
   id: string
-  name: string
+  full_name: string
   email: string
   employee_no: string
   phone: string
@@ -299,7 +302,7 @@ export default function Accounts() {
   function openOrg(target: Profile) {
     setOrgForm({
       id: target.id,
-      name: target.full_name || target.email || '未命名',
+      full_name: target.full_name || '',
       email: target.email ?? '',
       employee_no: target.employee_no ?? '',
       phone: target.phone ?? '',
@@ -313,6 +316,7 @@ export default function Accounts() {
 
   async function saveOrg() {
     if (!orgForm) return
+    if (!orgForm.full_name.trim()) return push('请填写成员姓名', 'error')
     const no = orgForm.employee_no.trim()
     if (
       no &&
@@ -324,6 +328,7 @@ export default function Accounts() {
     setOrgSaving(true)
     try {
       const payload: Record<string, unknown> = {
+        full_name: orgForm.full_name.trim(),
         employee_no: no || null,
         phone: orgForm.phone.trim() || null,
         wechat: orgForm.wechat.trim() || null,
@@ -606,9 +611,11 @@ export default function Accounts() {
                   const mine = p.id === user?.id
                   const operable = canOperateOn(role, p, user?.id)
                   const hrOperable = hrOperableOn(p)
-                  const canAct = operable || hrOperable
+                  const canManage = operable || hrOperable
                   const status = employmentOf(p)
                   const left = status === 'left'
+                  // 本人可改自己的姓名 / 工号 / 电话 / 微信（系统角色与启停仍受数据库守卫限制）
+                  const canEditProfile = canManage || (mine && !left)
                   const roleEditable = operable && !left
                   const pending = status === 'pending'
                   const disabled = p.status === 'disabled'
@@ -723,67 +730,72 @@ export default function Accounts() {
 
                       <td className="px-4 py-2.5">
                         <div className="flex items-center justify-end gap-0.5 whitespace-nowrap">
-                          {canAct ? (
+                          {canEditProfile || canManage ? (
                             <>
                               {!left && (
                                 <button
                                   className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50"
-                                  title={operable ? '部门 / 岗位 / 角色' : '部门 / 岗位'}
+                                  title={mine && !canManage ? '编辑我的档案' : '编辑员工档案'}
                                   disabled={busy}
                                   onClick={() => openOrg(p)}
                                 >
-                                  <Network className="w-3.5 h-3.5" />
+                                  <Pencil className="w-3.5 h-3.5" />
                                 </button>
                               )}
-                              {pending && (
-                                <button
-                                  className="p-1.5 rounded-md text-ink-400 hover:text-emerald-600 hover:bg-emerald-50"
-                                  title="确认入职并开通登录"
-                                  disabled={busy}
-                                  onClick={() => confirmHire(p)}
-                                >
-                                  <UserCheck className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                              {left ? (
-                                <button
-                                  className="p-1.5 rounded-md text-ink-400 hover:text-emerald-600 hover:bg-emerald-50"
-                                  title="恢复在职"
-                                  disabled={busy}
-                                  onClick={() => restoreMember(p)}
-                                >
-                                  <BadgeCheck className="w-3.5 h-3.5" />
-                                </button>
-                              ) : (
+                              {canManage && (
                                 <>
-                                  <button
-                                    className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100"
-                                    title={disabled ? '启用账号' : '停用账号'}
-                                    disabled={busy}
-                                    onClick={() => toggleStatus(p)}
-                                  >
-                                    {disabled ? <ShieldCheck className="w-3.5 h-3.5" /> : <UserX className="w-3.5 h-3.5" />}
-                                  </button>
-                                  <button
-                                    className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
-                                    title="办理离职并交接资源"
-                                    disabled={busy}
-                                    onClick={() => openOffboard(p)}
-                                  >
-                                    <ArrowRightLeft className="w-3.5 h-3.5" />
-                                  </button>
+                                  {pending && (
+                                    <button
+                                      className="p-1.5 rounded-md text-ink-400 hover:text-emerald-600 hover:bg-emerald-50"
+                                      title="确认入职并开通登录"
+                                      disabled={busy}
+                                      onClick={() => confirmHire(p)}
+                                    >
+                                      <UserCheck className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                  {left ? (
+                                    <button
+                                      className="p-1.5 rounded-md text-ink-400 hover:text-emerald-600 hover:bg-emerald-50"
+                                      title="恢复在职"
+                                      disabled={busy}
+                                      onClick={() => restoreMember(p)}
+                                    >
+                                      <BadgeCheck className="w-3.5 h-3.5" />
+                                    </button>
+                                  ) : (
+                                    <>
+                                      <button
+                                        className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100"
+                                        title={disabled ? '启用账号' : '停用账号'}
+                                        disabled={busy}
+                                        onClick={() => toggleStatus(p)}
+                                      >
+                                        {disabled ? <ShieldCheck className="w-3.5 h-3.5" /> : <UserX className="w-3.5 h-3.5" />}
+                                      </button>
+                                      <button
+                                        className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
+                                        title="办理离职并交接资源"
+                                        disabled={busy}
+                                        onClick={() => openOffboard(p)}
+                                      >
+                                        <ArrowRightLeft className="w-3.5 h-3.5" />
+                                      </button>
+                                    </>
+                                  )}
+                                  {isSuperAdmin && operable && (
+                                    <button
+                                      className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
+                                      title="移除档案"
+                                      disabled={busy}
+                                      onClick={() => setRemoving(p)}
+                                    >
+                                      <UserMinus className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
                                 </>
                               )}
-                              {isSuperAdmin && operable && (
-                                <button
-                                  className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
-                                  title="移除档案"
-                                  disabled={busy}
-                                  onClick={() => setRemoving(p)}
-                                >
-                                  <UserMinus className="w-3.5 h-3.5" />
-                                </button>
-                              )}
+                              {mine && !canManage && <span className="ml-1 text-[11px] text-ink-300">本人</span>}
                             </>
                           ) : (
                             <span className="text-[11px] text-ink-300">{mine ? '当前登录' : '无权限'}</span>
@@ -1045,7 +1057,7 @@ export default function Accounts() {
         open={!!orgForm}
         onClose={() => setOrgForm(null)}
         title="编辑员工档案"
-        description={orgForm ? `成员：${orgForm.name} · 工号 / 职位 / 部门 / 联系方式` : undefined}
+        description={orgForm ? `成员：${orgForm.full_name || orgForm.email} · 姓名 / 工号 / 职位 / 部门 / 联系方式` : undefined}
         footer={
           <>
             <Button onClick={() => setOrgForm(null)}>取消</Button>
@@ -1057,6 +1069,19 @@ export default function Accounts() {
       >
         {orgForm && (
           <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="姓名" required>
+                <input
+                  className="input"
+                  value={orgForm.full_name}
+                  placeholder="员工姓名"
+                  onChange={(e) => setOrgForm({ ...orgForm, full_name: e.target.value })}
+                />
+              </Field>
+              <Field label="登录邮箱" hint="登录邮箱在认证服务中维护，此处只读">
+                <p className="text-[12px] text-ink-500 h-9 flex items-center truncate">{orgForm.email || '—'}</p>
+              </Field>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="所属部门">
                 <Select
@@ -1092,18 +1117,13 @@ export default function Accounts() {
                   onChange={(e) => setOrgForm({ ...orgForm, phone: e.target.value })}
                 />
               </Field>
-              <Field label="微信">
+              <Field label="微信" className="col-span-2">
                 <input
                   className="input"
                   value={orgForm.wechat}
                   placeholder="微信号"
                   onChange={(e) => setOrgForm({ ...orgForm, wechat: e.target.value })}
                 />
-              </Field>
-              <Field label="邮箱" hint="登录邮箱，在认证服务中维护">
-                <p className="text-[12px] text-ink-500 h-9 flex items-center truncate">
-                  {orgForm.email || '—'}
-                </p>
               </Field>
             </div>
             <Field
