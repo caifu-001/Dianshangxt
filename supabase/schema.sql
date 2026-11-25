@@ -2166,6 +2166,14 @@ begin
     end if;
   end if;
 
+  -- 员工工号：管理员与人事岗可维护，其他成员（含本人）不能自行修改
+  -- 放在数据库守卫层，绕过界面直接调 API 也同样被拦住
+  if new.employee_no is distinct from old.employee_no then
+    if not (public.is_staff() or public.has_permission('hr.manage')) then
+      raise exception '员工工号只能由管理员或人事岗修改';
+    end if;
+  end if;
+
   return new;
 end;
 $$;

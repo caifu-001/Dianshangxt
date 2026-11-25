@@ -136,6 +136,8 @@ export default function Accounts() {
   const { push } = useToast()
   const canAdmin = can('account.manage')
   const canHr = can('hr.manage')
+  // 工号是人事编号，只有管理员 / 人力岗能维护；普通成员（含本人）只读
+  const canEditEmployeeNo = canAdmin || canHr
 
   const { data, loading, error, reload } = useAsync(async () => {
     const [profiles, departments, positions, roles] = await Promise.all([
@@ -319,6 +321,7 @@ export default function Accounts() {
     if (!orgForm.full_name.trim()) return push('请填写成员姓名', 'error')
     const no = orgForm.employee_no.trim()
     if (
+      canEditEmployeeNo &&
       no &&
       list.some(
         (p) => p.id !== orgForm.id && (p.employee_no ?? '').trim().toLowerCase() === no.toLowerCase(),
@@ -329,13 +332,14 @@ export default function Accounts() {
     try {
       const payload: Record<string, unknown> = {
         full_name: orgForm.full_name.trim(),
-        employee_no: no || null,
         phone: orgForm.phone.trim() || null,
         wechat: orgForm.wechat.trim() || null,
         department_id: orgForm.department_id || null,
         position_id: orgForm.position_id || null,
         note: orgForm.note.trim() || null,
       }
+      // 工号只有管理员 / 人力岗能改；其他人保存时不带该字段，数据库守卫也会再拦一层
+      if (canEditEmployeeNo) payload.employee_no = no || null
       // 岗位角色决定业务权限，只有管理员能改；HR 调岗只动部门与岗位
       if (canAdmin) payload.role_id = orgForm.role_id || null
       await updateRow<Profile>('profiles', orgForm.id, payload)
@@ -567,6 +571,7 @@ export default function Accounts() {
           <b className="text-ink-800">系统角色</b>决定管理级别：超管全权、管理员可管人、普通人员不可管人；
           <b className="text-ink-800 ml-1.5">部门范围</b>决定团队能看哪些模块（组织架构 → 权限总览里配）；
           <b className="text-ink-800 ml-1.5">岗位角色</b>再给个人额外的业务范围。三者叠加生效。
+          <b className="text-ink-800 ml-1.5">员工工号</b>由管理员或人力岗维护，其他成员不可自行修改。
           <br />
           {canAdmin
             ? '账号由管理员在这里直接开通，不用再让同事自助注册；初始密码交给本人后，建议勾选「首次登录必须改密」。'
@@ -628,7 +633,8 @@ export default function Accounts() {
                   const canManage = operable || hrOperable
                   const status = employmentOf(p)
                   const left = status === 'left'
-                  // 本人可改自己的姓名 / 工号 / 电话 / 微信（系统角色与启停仍受数据库守卫限制）
+                  // 本人可改自己的姓名 / 电话 / 微信；工号只有管理员 / 人力岗可改
+                  // （系统角色与启停仍受数据库守卫限制）
                   const canEditProfile = canManage || (mine && !left)
                   const roleEditable = operable && !left
                   const pending = status === 'pending'
@@ -1071,7 +1077,7 @@ export default function Accounts() {
         open={!!orgForm}
         onClose={() => setOrgForm(null)}
         title="编辑员工档案"
-        description={orgForm ? `成员：${orgForm.full_name || orgForm.email} · 姓名 / 工号 / 职位 / 部门 / 联系方式` : undefined}
+        description={orgForm ? `成员：${orgForm.full_name || orgForm.email} · ${canEditEmployeeNo ? '姓名 / 工号 / 职位 / 部门 / 联系方式' : '姓名 / 职位 / 部门 / 联系方式（工号由人力或管理员维护）'}` : undefined}
         footer={
           <>
             <Button onClick={() => setOrgForm(null)}>取消</Button>
@@ -1115,11 +1121,15 @@ export default function Accounts() {
               </Field>
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="员工工号" hint="全公司唯一，可留空">
+              <Field
+                label="员工工号"
+                hint={canEditEmployeeNo ? '全公司唯一，可留空' : '工号由人力或管理员维护，个人不可修改'}
+              >
                 <input
-                  className="input num"
+                  className="input num disabled:bg-ink-50 disabled:text-ink-400"
                   value={orgForm.employee_no}
                   placeholder="如 E1024"
+                  disabled={!canEditEmployeeNo}
                   onChange={(e) => setOrgForm({ ...orgForm, employee_no: e.target.value })}
                 />
               </Field>
