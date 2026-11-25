@@ -18,6 +18,10 @@
 
 ![利润核算](docs/preview-profit.png)
 
+![组织架构 · 角色与权限](docs/preview-org.png)
+
+![账号管理 · 部门与岗位角色](docs/preview-accounts.png)
+
 </details>
 
 
