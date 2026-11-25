@@ -183,6 +183,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .update({ last_sign_in_at: new Date().toISOString() })
         .eq('id', data.user.id)
         .then(() => undefined, () => undefined)
+      void supabase
+        .rpc('log_system_event', {
+          p_category: 'auth',
+          p_action: 'login',
+          p_summary: `${email} 通过密码登录`,
+          p_detail: { method: 'password' },
+        })
+        .then(() => undefined, () => undefined)
     }
   }, [])
 
@@ -231,6 +239,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       type: 'email',
     })
     if (error) throw new Error(translateAuthError(error.message))
+    void supabase
+      .rpc('log_system_event', {
+        p_category: 'auth',
+        p_action: 'otp_login',
+        p_summary: `${email} 通过邮箱验证码登录`,
+        p_detail: { method: 'otp' },
+      })
+      .then(() => undefined, () => undefined)
   }, [])
 
   const changePassword = useCallback(
@@ -258,6 +274,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const signOut = useCallback(async () => {
+    // 退出前先留痕（退出后 auth.uid() 就没了）
+    void supabase
+      .rpc('log_system_event', {
+        p_category: 'auth',
+        p_action: 'logout',
+        p_summary: '退出登录',
+        p_detail: {},
+      })
+      .then(() => undefined, () => undefined)
     await supabase.auth.signOut()
     setProfile(null)
     setBlocked(null)

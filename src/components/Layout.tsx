@@ -13,6 +13,7 @@ import {
   Globe2,
   KeyRound,
   LayoutDashboard,
+  ScrollText,
   LogOut,
   Megaphone,
   Menu,
@@ -100,6 +101,7 @@ const NAV_GROUPS: Array<{
     title: '平台',
     items: [
       { to: '/companies', label: '公司管理', icon: Building2, superOnly: true },
+      { to: '/system-logs', label: '系统日志', icon: ScrollText, superOnly: true },
     ],
   },
 ]

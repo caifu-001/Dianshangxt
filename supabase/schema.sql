@@ -751,6 +751,36 @@ create index if not exists idx_emp_events_profile on public.employee_events(prof
 create index if not exists idx_emp_events_time    on public.employee_events(created_at desc);
 
 -- -------------------------------------------------------------
+-- 13b. 系统日志：平台超管专属的审计轨迹
+--      · 用户登录 / 退出由前端在认证成功后调用 log_system_event 落一条
+--      · 角色 / 状态 / 公司归属变更由触发器自动落库，前端无法伪造或删除
+--      · 普通账号没有任何 select / insert / update / delete 表权限，
+--        只能经 log_system_event 以自己身份写一条，读全部由 list_system_logs 校验超管
+-- -------------------------------------------------------------
+create table if not exists public.system_logs (
+  id          uuid primary key default gen_random_uuid(),
+  created_at  timestamptz not null default now(),
+  company_id  uuid,
+  actor_id    uuid,
+  actor_email text,
+  actor_name  text,
+  category    text not null default 'system'
+              check (category in ('auth','security','account','company','business','system','error')),
+  action      text not null,
+  summary     text not null,
+  detail      jsonb not null default '{}'::jsonb,
+  target_type text,
+  target_id   text,
+  severity    text not null default 'info'
+              check (severity in ('info','warning','error'))
+);
+create index if not exists idx_sys_logs_time     on public.system_logs(created_at desc);
+create index if not exists idx_sys_logs_category on public.system_logs(category, created_at desc);
+create index if not exists idx_sys_logs_actor    on public.system_logs(actor_id, created_at desc);
+alter table public.system_logs enable row level security;
+-- 策略在 is_super_admin() 定义之后创建（见「平台级表」小节）
+
+-- -------------------------------------------------------------
 -- 14. 绩效：按考核周期记录评分与评语
 --     一人一周期一条，重新评定覆盖原记录（updated_at 变化可追溯）。
 --     department_id 保存评估当时的部门快照，避免调岗后历史报表被改写。
@@ -1401,6 +1431,126 @@ as $$
   );
 $$;
 
+-- 写系统日志：任何登录用户都能记自己的操作（如登录 / 登出），
+-- 但 actor 身份一律取自 auth.uid()，前端传什么都伪造不了别人。
+-- 日志表本身不给 authenticated 任何写权限，全部经这个 security definer 函数落库。
+create or replace function public.log_system_event(
+  p_category   text,
+  p_action     text,
+  p_summary    text,
+  p_detail     jsonb default '{}'::jsonb,
+  p_target_type text default null,
+  p_target_id  text default null,
+  p_severity   text default 'info'
+)
+returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_company uuid;
+  v_email   text;
+  v_name    text;
+begin
+  if auth.uid() is null then
+    return;
+  end if;
+  select company_id, email, full_name
+    into v_company, v_email, v_name
+    from public.profiles where id = auth.uid();
+
+  -- 超管不属于任何公司，记录他当前管理视角，便于审计追溯
+  if v_company is null then
+    v_company := public.current_company_id();
+  end if;
+
+  -- 普通账号只能由前端记自己的登录 / 退出；其他类别由数据库函数与触发器写入，
+  -- 防止有人伪造「安全事件」污染审计轨迹
+  if not public.is_super_admin() and p_category <> 'auth' then
+    return;
+  end if;
+
+  insert into public.system_logs
+    (company_id, actor_id, actor_email, actor_name, category, action, summary, detail, target_type, target_id, severity)
+  values
+    (v_company, auth.uid(), v_email, v_name,
+     case when p_category in ('auth','security','account','company','business','system','error')
+          then p_category else 'system' end,
+     left(coalesce(p_action, 'event'), 80),
+     left(coalesce(p_summary, ''), 500),
+     coalesce(p_detail, '{}'::jsonb),
+     p_target_type, p_target_id,
+     case when p_severity in ('info','warning','error') then p_severity else 'info' end);
+end;
+$$;
+
+-- 读系统日志：只有平台超管能拿到任何行，其余账号查不到（security definer 绕过 RLS 后自行校验）
+create or replace function public.list_system_logs(
+  p_limit   integer default 100,
+  p_category text default null,
+  p_severity text default null,
+  p_search  text default null
+)
+returns table (
+  id uuid, created_at timestamptz, company_id uuid,
+  actor_id uuid, actor_email text, actor_name text,
+  category text, action text, summary text, detail jsonb,
+  target_type text, target_id text, severity text
+)
+language sql stable security definer set search_path = public
+as $$
+  select l.id, l.created_at, l.company_id, l.actor_id, l.actor_email, l.actor_name,
+         l.category, l.action, l.summary, l.detail, l.target_type, l.target_id, l.severity
+    from public.system_logs l
+   where public.is_super_admin()
+     and (p_category is null or l.category = p_category)
+     and (p_severity is null or l.severity = p_severity)
+     and (p_search is null or p_search = ''
+          or l.summary ilike '%' || p_search || '%'
+          or coalesce(l.actor_email,'') ilike '%' || p_search || '%'
+          or coalesce(l.actor_name,'') ilike '%' || p_search || '%'
+          or l.action ilike '%' || p_search || '%')
+   order by l.created_at desc
+   limit least(greatest(coalesce(p_limit, 100), 1), 500);
+$$;
+
+-- 系统角色 / 状态 / 公司归属变化时自动留痕，前端改代码也绕不过
+create or replace function public.log_profile_security_event()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if tg_op <> 'UPDATE' then
+    return new;
+  end if;
+
+  if new.role is distinct from old.role then
+    perform public.log_system_event('security', 'role_change',
+      '系统角色 ' || coalesce(old.role,'') || ' → ' || coalesce(new.role,''),
+      jsonb_build_object('target', new.email, 'from', old.role, 'to', new.role),
+      'profiles', new.id::text,
+      case when new.role = 'super_admin' then 'warning' else 'info' end);
+  end if;
+  if new.status is distinct from old.status then
+    perform public.log_system_event('security', 'status_change',
+      '账号状态 ' || coalesce(old.status,'') || ' → ' || coalesce(new.status,''),
+      jsonb_build_object('target', new.email, 'from', old.status, 'to', new.status),
+      'profiles', new.id::text, 'warning');
+  end if;
+  if new.company_id is distinct from old.company_id then
+    perform public.log_system_event('security', 'company_change',
+      '成员公司归属调整',
+      jsonb_build_object('target', new.email, 'from', old.company_id, 'to', new.company_id),
+      'profiles', new.id::text, 'warning');
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_log_profile_security on public.profiles;
+create trigger trg_log_profile_security
+  after update on public.profiles
+  for each row execute function public.log_profile_security_event();
+
 -- ---------- 多租户：公司管理（仅平台超管） ----------
 create or replace function public.list_companies()
 returns table (id uuid, name text, code text, status text, note text, member_count bigint, created_at timestamptz)
@@ -1448,6 +1598,10 @@ begin
   insert into public.companies (name, code, note)
   values (trim(p_name), nullif(trim(coalesce(p_code, '')), ''), p_note)
   returning id into v_id;
+  perform public.log_system_event('company', 'company_create',
+    '创建公司「' || trim(p_name) || '」',
+    jsonb_build_object('company_id', v_id, 'code', p_code),
+    'companies', v_id::text);
   return v_id;
 end;
 $$;
@@ -1556,6 +1710,10 @@ begin
   update public.company_registrations
      set status = 'approved', reviewed_by = auth.uid(), reviewed_at = now(), company_id = v_company
    where id = p_id;
+  perform public.log_system_event('company', 'registration_approve',
+    '通过「' || r.company_name || '」的入驻申请',
+    jsonb_build_object('applicant', r.applicant_email, 'company_id', v_company),
+    'company_registrations', p_id::text);
   return v_company;
 end;
 $$;
@@ -1578,6 +1736,10 @@ begin
   update public.company_registrations
      set status = 'rejected', reviewed_by = auth.uid(), reviewed_at = now(), reject_reason = p_reason
    where id = p_id;
+  perform public.log_system_event('company', 'registration_reject',
+    '驳回「' || r.company_name || '」的入驻申请',
+    jsonb_build_object('applicant', r.applicant_email, 'reason', p_reason),
+    'company_registrations', p_id::text);
   -- 驳回后账号保持 pending（无法登录业务），由超管决定是否删除或另行处理
 end;
 $$;
@@ -1599,6 +1761,10 @@ begin
          status = p_status,
          note = p_note
    where id = p_id;
+  perform public.log_system_event('company', 'company_update',
+    '更新公司「' || trim(p_name) || '」',
+    jsonb_build_object('company_id', p_id, 'status', p_status),
+    'companies', p_id::text);
 end;
 $$;
 
@@ -1614,6 +1780,10 @@ begin
     raise exception '公司不存在或已停用';
   end if;
   update public.profiles set active_company_id = p_company where id = auth.uid();
+  perform public.log_system_event('company', 'company_switch',
+    '切换管理视角到公司 ' || p_company::text,
+    jsonb_build_object('company_id', p_company),
+    'companies', p_company::text);
 end;
 $$;
 
@@ -1709,6 +1879,13 @@ begin
     end if;
   end loop;
 
+  if v_moved > 0 then
+    perform public.log_system_event('company', 'member_move',
+      '批量调配 ' || v_moved || ' 名成员到公司「' || v_target.name || '」',
+      jsonb_build_object('count', v_moved, 'company_id', p_company, 'members', p_members),
+      'companies', p_company::text, 'warning');
+  end if;
+
   return v_moved;
 end;
 $$;
@@ -1783,7 +1960,8 @@ declare
   tabs text[] := array[
     'profiles','stores','products','orders','inventory',
     'campaigns','creators','tasks','expenses',
-    'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
+    'competitors','competitor_snapshots','suppliers','supplier_products','supplier_contacts',
+    'purchase_orders','purchase_items',
     'departments','positions','roles','access_requests','employee_events',
     'performance_reviews','stock_movements','stock_transfers','purchase_payments','purchase_approvals',
     'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics',
@@ -1804,6 +1982,12 @@ create policy "companies_platform_only" on public.companies
   for all to authenticated
   using (public.is_super_admin())
   with check (public.is_super_admin());
+
+-- 系统日志：只放开 select 给超管；写操作只能走 log_system_event 函数
+drop policy if exists "system_logs_super_select" on public.system_logs;
+create policy "system_logs_super_select" on public.system_logs
+  for select to authenticated
+  using (public.is_super_admin());
 
 -- ---------- profiles ----------
 drop policy if exists "profiles_select_own"   on public.profiles;
@@ -3650,6 +3834,11 @@ grant select, insert, update, delete on
   public.access_requests, public.employee_events, public.performance_reviews,
   public.stock_movements, public.stock_transfers, public.purchase_payments
   to authenticated;
+
+-- 系统日志：表只给 select（且被 RLS 收窄到超管），写全部走 log_system_event 函数
+grant select on public.system_logs to authenticated;
+grant execute on function public.log_system_event(text, text, text, jsonb, text, text, text) to authenticated;
+grant execute on function public.list_system_logs(integer, text, text, text) to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
 grant execute on function public.offboard_member(uuid, uuid, text) to authenticated;

@@ -28,6 +28,7 @@ import Org from './pages/Org'
 import Performance from './pages/Performance'
 import Settings from './pages/Settings'
 import Companies from './pages/Companies'
+import SystemLogs from './pages/SystemLogs'
 
 /** 平台级页面守卫：公司管理只有全局超管能进，公司内普通管理员也看不到入口 */
 function RequireSuperAdmin({ children }: { children: ReactNode }) {
@@ -216,6 +217,14 @@ function AppRoutes() {
           element={
             <RequireSuperAdmin>
               <Companies />
+            </RequireSuperAdmin>
+          }
+        />
+        <Route
+          path="system-logs"
+          element={
+            <RequireSuperAdmin>
+              <SystemLogs />
             </RequireSuperAdmin>
           }
         />
