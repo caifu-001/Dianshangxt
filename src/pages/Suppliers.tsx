@@ -636,7 +636,7 @@ export default function Suppliers() {
       } catch (e) {
         const msg = e instanceof Error ? e.message : ''
         warning = /could not find the table|relation .* does not exist|column .* does not exist/i.test(msg)
-          ? '联系人（数据库未升级，请到「数据源」重跑建表脚本）'
+          ? '联系人（系统升级中，请联系管理员）'
           : '联系人'
       }
 
@@ -679,7 +679,7 @@ export default function Suppliers() {
         warning = warning
           ? '联系人与可供产品'
           : needUpgrade
-            ? '可供产品（数据库未升级，请到「数据源」重跑建表脚本）'
+            ? '可供产品（系统升级中，请联系管理员）'
             : '可供产品'
       }
 

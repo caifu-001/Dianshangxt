@@ -404,7 +404,7 @@ export default function Accounts() {
         await callRpc('assign_member_company', { p_user: userId, p_company: currentCompanyId })
       } catch (err) {
         push(
-          `登录账号已创建，但公司归属分配失败（${err instanceof Error ? err.message : '未知错误'}）。请先在数据源页执行最新脚本后重试。`,
+          `登录账号已创建，但公司归属分配失败（${err instanceof Error ? err.message : '未知错误'}）。请联系系统管理员处理后重试。`,
           'error',
         )
         setCreateLoading(false)
@@ -848,7 +848,7 @@ export default function Accounts() {
         当前你的系统角色：<b className="text-ink-600">{ROLE_META[role].label}</b>（{ROLE_META[role].desc}）
         {me?.email ? ` · ${me.email}` : ''}
         <br />
-        所有校验都在数据库层完成（RLS + 权限函数 + 触发器 + 离职交接函数），绕过界面直接调接口同样会被拒绝；
+        所有校验都在系统底层完成，绕过界面直接调接口同样会被拒绝；
         系统角色与岗位角色只有管理员能改，人事岗只能办理入离职与调岗，成员无法给自己提权或改回在职状态。
       </p>
 
@@ -883,7 +883,7 @@ export default function Accounts() {
               </p>
               <p className="mt-1 text-[11.5px] leading-relaxed text-emerald-700">
                 {created.needsConfirm
-                  ? '项目开启了邮箱确认：请让 TA 打开邮箱点击确认链接后才能登录。想跳过这一步，可在 Supabase → Authentication → Providers 关闭 Confirm email。'
+                  ? '系统开启了邮箱确认：请让 TA 打开邮箱点击确认链接后才能登录。'
                   : created.pending
                     ? '账号已创建但标记为待入职，账号暂时无法登录。入职当天点一下「确认入职」即可开通。'
                     : '账号已可直接登录，请把下面的初始密码发给本人。'}
@@ -1088,8 +1088,8 @@ export default function Accounts() {
             </div>
 
             <p className="text-[11px] leading-relaxed text-ink-400">
-              账号通过 Supabase 注册接口创建，不会影响你当前登录的会话。
-              若项目开启了邮箱确认，需要本人点邮件里的链接才能登录。
+              新账号通过系统注册接口创建，不会影响你当前登录的会话。
+              若开启了邮箱确认，需要本人点邮件里的链接才能登录。
             </p>
           </div>
         )}
@@ -1282,7 +1282,7 @@ export default function Accounts() {
         confirmText="确认移除"
         message={
           removing
-            ? `将移除 ${removing.full_name || removing.email} 的档案，该账号会立刻失去系统访问权限，其录入的业务数据保留。日常离职请用「办理离职」保留审计记录；Supabase Auth 里的登录凭据不会被删除。`
+            ? `将移除 ${removing.full_name || removing.email} 的档案，该账号会立刻失去系统访问权限，其录入的业务数据保留。日常离职请用「办理离职」保留审计记录；登录凭据不会被删除。`
             : ''
         }
       />

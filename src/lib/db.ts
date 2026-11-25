@@ -13,13 +13,13 @@ function translateDbError(message: string): string {
     return '你的岗位角色没有该操作的权限，请联系管理员在「人员与账号」中调整角色'
   }
   if (/relation .* does not exist|could not find the table/i.test(message)) {
-    return '该功能的数据表还没创建，请到「数据源」页复制最新脚本，在 Supabase SQL Editor 重新执行一次'
+    return '该功能尚未初始化，请联系系统管理员处理'
   }
   if (/could not find the function|function .* does not exist/i.test(message)) {
-    return '该功能依赖的数据库函数还没创建，请到「数据源」页复制最新脚本，在 Supabase SQL Editor 重新执行一次'
+    return '该功能依赖的能力尚未启用，请联系系统管理员处理'
   }
   if (/column .* does not exist/i.test(message)) {
-    return '数据表缺少新版本字段，请到「数据源」页复制最新脚本重新执行一次'
+    return '该功能的数据格式需要升级，请联系系统管理员处理'
   }
   if (/duplicate key value/i.test(message)) {
     return '记录已存在（SKU / 订单号等唯一键重复）'
@@ -34,7 +34,7 @@ function translateDbError(message: string): string {
     return '没有找到对应的成员档案，可能账号刚创建还没同步完，请刷新页面重试'
   }
   if (/permission denied for table|permission denied for function/i.test(message)) {
-    return '当前账号没有执行该操作的数据库权限，请确认已经执行最新的建表脚本'
+    return '当前账号没有执行该操作的权限，请联系管理员'
   }
   return message
 }
@@ -132,7 +132,7 @@ export async function checkSchema(): Promise<{ ready: boolean; message?: string 
   const { error } = await db().from('stores').select('id', { head: true, count: 'exact' }).limit(1)
   if (!error) return { ready: true }
   if (error.code === 'PGRST205' || /could not find the table/i.test(error.message)) {
-    return { ready: false, message: '数据库尚未初始化，需要执行建表脚本' }
+    return { ready: false, message: '系统尚未初始化，请联系管理员处理' }
   }
   return { ready: false, message: error.message }
 }

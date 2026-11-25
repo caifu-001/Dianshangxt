@@ -340,13 +340,13 @@ function translateAuthError(message: string) {
     [/User already registered/i, '该邮箱已注册，请直接登录'],
     [/Password should be at least (\d+) characters/i, '密码长度至少 6 位'],
     [/Unable to validate email address/i, '邮箱格式不正确'],
-    [/signup is disabled/i, '当前项目已关闭邮箱注册，请在 Supabase 控制台开启'],
+    [/signup is disabled/i, '当前系统已关闭邮箱注册，请联系管理员'],
     [/Email rate limit exceeded/i, '发送过于频繁，请稍后再试'],
     [/For security purposes, you can only request this after (\d+) seconds/i, '请求过于频繁，请稍后再试'],
     [/Signups not allowed for otp/i, '该邮箱尚未注册，请先切换到「注册」创建账号'],
     [/Token has expired or is invalid/i, '验证码错误或已过期，请重新获取'],
     [/invalid.*otp|otp.*invalid/i, '验证码错误，请核对后重试'],
-    [/Database error saving new user/i, '数据库未初始化，请先执行建表脚本'],
+    [/Database error saving new user/i, '系统尚未初始化，请联系管理员'],
   ]
   for (const [pattern, text] of map) if (pattern.test(message)) return text
   return message

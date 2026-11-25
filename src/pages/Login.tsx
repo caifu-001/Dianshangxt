@@ -250,7 +250,7 @@ export default function Login() {
 
           <div className="flex items-center gap-2 text-[11px] text-white/40">
             <ShieldCheck className="w-3.5 h-3.5" />
-            图形验证码 + 失败锁定 + 行级权限隔离，团队外不可见
+            图形验证码 + 失败锁定 + 权限隔离，团队外不可见
           </div>
         </div>
       </div>
@@ -491,8 +491,7 @@ export default function Login() {
           {otpStageVisible && otpSent && (
             <p className="mt-3 text-[11px] leading-relaxed text-ink-400">
               邮件里若是 6 位数字，填到上方即可；若是登录链接，直接点它也能完成登录。
-              收不到请先看垃圾箱；长期用需要在 Supabase → Authentication → Emails 配自有 SMTP
-              （内置邮件服务每小时仅 2 封，且只能发给项目成员）。
+              收不到请先看垃圾箱；如需长期使用，可联系管理员配置企业邮件服务。
             </p>
           )}
 

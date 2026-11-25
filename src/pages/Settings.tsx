@@ -333,7 +333,7 @@ export default function Settings() {
       push('脚本已复制')
       setTimeout(() => setCopied(false), 2000)
     } catch {
-      push('复制失败，请到「数据源」页面手动复制', 'error')
+      push('复制失败，请联系系统管理员', 'error')
     }
   }
 
@@ -341,7 +341,7 @@ export default function Settings() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <PageHeader title="系统设置" description="账号资料、数据源与演示数据管理" />
+      <PageHeader title="系统设置" description="账号资料、所属公司与偏好设置" />
 
       {!canManageSystem && (
         <div className="rounded-xl border border-amber-200/70 bg-amber-50 px-3.5 py-2.5 mb-3 flex items-start gap-2">
@@ -416,7 +416,7 @@ export default function Settings() {
             </div>
           ) : (
             <p className="text-[12px] text-ink-500 leading-relaxed">
-              当前账号未归属任何公司，或数据库还未升级到多租户版本。请到「数据源」页执行最新脚本后再查看。
+              当前账号未归属任何公司，或系统尚未完成升级。请联系系统管理员处理后查看。
             </p>
           )}
         </div>
@@ -672,17 +672,19 @@ export default function Settings() {
             </Button>
           </div>
 
-          <div className="p-4 flex flex-wrap items-center gap-3">
-            <div className="min-w-0 flex-1">
-              <p className="text-[13px] font-medium text-ink-800">导出初始化脚本</p>
-              <p className="mt-0.5 text-[11.5px] text-ink-500 leading-relaxed">
-                下载 schema.sql，可在新项目中复用同一套表结构。
-              </p>
+          {isSuperAdmin && (
+            <div className="p-4 flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium text-ink-800">导出初始化脚本</p>
+                <p className="mt-0.5 text-[11.5px] text-ink-500 leading-relaxed">
+                  下载 schema.sql，可在新项目中复用同一套表结构。
+                </p>
+              </div>
+              <Button size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={() => downloadTextFile('schema.sql', schemaSql, 'text/plain;charset=utf-8')}>
+                下载
+              </Button>
             </div>
-            <Button size="sm" icon={<Download className="w-3.5 h-3.5" />} onClick={() => downloadTextFile('schema.sql', schemaSql, 'text/plain;charset=utf-8')}>
-              下载
-            </Button>
-          </div>
+          )}
 
           <div className="p-4 flex flex-wrap items-center gap-3 bg-rose-50/40">
             <div className="min-w-0 flex-1">

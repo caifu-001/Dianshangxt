@@ -81,12 +81,12 @@ export function randomPassword(length = 12): string {
 
 function translateSignupError(message: string): string {
   const map: Array<[RegExp, string]> = [
-    [/signup is disabled|Signups not allowed/i, '项目已关闭邮箱注册，请在 Supabase → Authentication 打开 Email 注册'],
+    [/signup is disabled|Signups not allowed/i, '系统已关闭邮箱注册，请联系管理员处理'],
     [/User already registered/i, '该邮箱已经注册过，请直接在成员列表里调整他的角色与组织归属'],
     [/Password should be at least (\d+)/i, '密码长度不足，至少 8 位'],
     [/Unable to validate email address/i, '邮箱格式不正确'],
-    [/rate limit|too many requests/i, '创建过于频繁，请稍等几分钟再试（Supabase 对注册接口有限流）'],
-    [/Database error saving new user/i, '数据库未初始化，请先执行建表脚本'],
+    [/rate limit|too many requests/i, '创建过于频繁，请稍等几分钟再试'],
+    [/Database error saving new user/i, '系统尚未初始化，请联系管理员处理'],
   ]
   for (const [pattern, text] of map) if (pattern.test(message)) return text
   return message

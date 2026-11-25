@@ -357,8 +357,8 @@ export default function AppLayout() {
           </div>
         </header>
 
-        {/* 旧版数据库缺少组织架构字段时，权限体系不完整，给出明确指引 */}
-        {profile && !('role_id' in profile) && (
+        {/* 旧版数据库缺少组织架构字段时，权限体系不完整；仅提示超管去处理 */}
+        {isSuperAdmin && profile && !('role_id' in profile) && (
           <div className="px-4 sm:px-6 pt-4">
             <div className="rounded-xl border border-amber-200/80 bg-amber-50 px-3.5 py-2.5 flex items-start gap-2">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />

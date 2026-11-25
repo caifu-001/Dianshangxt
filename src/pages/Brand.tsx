@@ -426,7 +426,7 @@ export default function Brand() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : '保存失败'
       push(/could not find the table|relation .* does not exist/i.test(msg)
-        ? '数据库表还没创建，请到「数据源」重跑最新建表脚本'
+        ? '该功能尚未初始化，请联系系统管理员处理'
         : msg, 'error')
     } finally {
       setSaving(false)
@@ -476,7 +476,7 @@ export default function Brand() {
 
       {emptyEverything && (
         <div className="mb-3 rounded-lg border border-amber-200 bg-amber-50/60 px-3.5 py-2.5 text-[11.5px] text-amber-800 leading-relaxed">
-          还没有品牌营销数据。若刚升级过数据库，请到「数据源」复制最新脚本在 Supabase SQL Editor 执行一次；
+          还没有品牌营销数据。若刚升级过系统，请联系管理员完成初始化；
           然后点右上角「新增」开始录入社媒账号与红人。
         </div>
       )}
