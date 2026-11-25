@@ -44,6 +44,7 @@ const RESOURCE_COLUMNS = [
   { table: 'purchase_orders', label: '采购单' },
   { table: 'competitors', label: '竞品' },
   { table: 'suppliers', label: '供应商' },
+  { table: 'supplier_products', label: '供应商产品' },
   { table: 'tasks', label: '任务' },
 ]
 
@@ -59,6 +60,7 @@ const ALL_TABLES = [
   'competitors',
   'competitor_snapshots',
   'suppliers',
+  'supplier_products',
   'purchase_orders',
   'purchase_items',
 ]

@@ -39,6 +39,10 @@ const PRODUCTS: SeedProduct[] = [
 ]
 
 export async function seedDemoData() {
+  // 演示单据挂到当前账号，绩效与利润归属才能算出东西
+  const me = (await supabase.auth.getUser()).data.user
+  const ownerId = me?.id ?? null
+
   // 1. 店铺
   const stores = await insertRows<{ id: string; platform: string; currency: string }>(
     'stores',
@@ -104,6 +108,7 @@ export async function seedDemoData() {
         refund_amount: refunded ? gross : 0,
         other_fee: round2(rand(0, 0.8)),
         status: refunded ? 'refunded' : d < 6 ? pick(['pending', 'shipped']) : 'delivered',
+        owner_id: ownerId,
       })
     }
   }
@@ -204,7 +209,7 @@ export async function seedDemoData() {
     { store_id: stores[0].id, title: '补充 cutting board 五点描述卖点', module: 'listing', priority: 'medium', status: 'todo', due_date: daysAgo(-4), assignee: '文案组' },
     { store_id: stores[2].id, title: '@homedecorali 寄样跟进', module: 'content', priority: 'high', status: 'doing', due_date: daysAgo(-1), assignee: '达人组' },
     { store_id: stores[1].id, title: '英国站 VAT 季度申报资料整理', module: 'finance', priority: 'high', status: 'todo', due_date: daysAgo(-6), assignee: '财务' },
-    { store_id: stores[2].id, title: 'Silk Pillowcase 补货 500 件', module: 'inventory', priority: 'high', status: 'todo', due_date: daysAgo(-3), assignee: '供应链' },
+    { store_id: stores[2].id, title: 'Silk Pillowcase 补货 500 件', module: 'inventory', priority: 'high', status: 'todo', due_date: daysAgo(-3), assignee: '供应链', owner_id: ownerId },
     { store_id: stores[0].id, title: 'SP 自动广告否定词清理', module: 'ads', priority: 'medium', status: 'done', due_date: daysAgo(1), assignee: '广告组' },
     { store_id: stores[1].id, title: '处理 3 条 1 星差评', module: 'customer', priority: 'high', status: 'todo', due_date: daysAgo(0), assignee: '客服' },
     { store_id: null, title: 'Q4 旺季备货计划评审', module: 'other', priority: 'medium', status: 'todo', due_date: daysAgo(-8), assignee: '运营负责人' },
@@ -363,6 +368,39 @@ export async function seedDemoData() {
       ].map((s) => ({ ...s, status: 'active' })),
     )
 
+    // 供应商可供产品 / 报价：与采购单里的品类对应，供缺货补货自动带价
+    const spSeed: Array<{ supplier: number; product: number; cost: number; lead: number; tags: string[] }> = [
+      { supplier: 0, product: 0, cost: 45.5, lead: 25, tags: ['快速打样'] },
+      { supplier: 0, product: 4, cost: 54.0, lead: 28, tags: ['实木'] },
+      { supplier: 0, product: 1, cost: 34.2, lead: 22, tags: ['小批量'] },
+      { supplier: 1, product: 2, cost: 65.4, lead: 32, tags: ['手工釉面'] },
+      { supplier: 1, product: 3, cost: 22.0, lead: 30, tags: [] },
+      { supplier: 2, product: 5, cost: 37.0, lead: 38, tags: ['OEM'] },
+      { supplier: 2, product: 6, cost: 43.5, lead: 40, tags: [] },
+      { supplier: 3, product: 8, cost: 63.0, lead: 20, tags: ['22姆米', '外贸原单'] },
+    ]
+    const supplierProducts = spSeed.map((x) => {
+      const product = PRODUCTS[x.product]
+      return {
+        supplier_id: supplierRows[x.supplier].id,
+        product_id: products[x.product].id,
+        sku: product.sku,
+        title: product.title,
+        unit: '件',
+        currency: 'CNY',
+        unit_cost: x.cost,
+        moq: 100,
+        lead_time_days: x.lead,
+        status: 'active',
+        note: x.tags.join(' / ') || null,
+      }
+    })
+    try {
+      await insertRows('supplier_products', supplierProducts)
+    } catch {
+      // 供应商库表还没建（旧库未升级）：跳过报价演示数据
+    }
+
     const poSeed: Array<{
       supplier: number
       daysBack: number
@@ -384,6 +422,7 @@ export async function seedDemoData() {
       const orderDate = daysAgo(seed.daysBack)
       const storeIndex = PRODUCTS[seed.items[0].p].store
       const po = await insertRow<{ id: string }>('purchase_orders', {
+        buyer_id: ownerId,
         po_no: `PO-${orderDate.replace(/-/g, '').slice(2)}-0${i + 1}`,
         supplier_id: supplierRows[seed.supplier].id,
         store_id: stores[storeIndex].id,

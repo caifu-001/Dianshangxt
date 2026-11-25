@@ -7,6 +7,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Sparkles,
   Target,
   Trash2,
   TrendingUp,
@@ -14,6 +15,7 @@ import {
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
 import { useAsync } from '../hooks/useAsync'
+import { applyPerformanceScore } from '../lib/flow'
 import { callRpc, deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
 import type { Department, PerformanceGrade, PerformanceReview } from '../lib/types'
 import {
@@ -136,6 +138,8 @@ export default function Performance() {
   const [form, setForm] = useState<ReviewForm>(() => emptyForm(currentPeriod()))
   const [saving, setSaving] = useState(false)
   const [toDelete, setToDelete] = useState<PerformanceReview | null>(null)
+  const [scoring, setScoring] = useState(false)
+  const [scoringId, setScoringId] = useState('')
 
   const periodReviews = useMemo(() => reviews.filter((r) => r.period === period), [reviews, period])
 
@@ -264,6 +268,45 @@ export default function Performance() {
     }
   }
 
+  /** 按订单 / 采购 / 任务的真实数据重算一个人 */
+  async function scoreOne(person: DirectoryRow) {
+    setScoringId(person.id)
+    try {
+      const m = await applyPerformanceScore(person.id, period)
+      push(`${person.full_name || person.email} 已按数据算分：${m.score} 分（${m.grade}）`)
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '算分失败', 'error')
+    } finally {
+      setScoringId('')
+    }
+  }
+
+  /** 批量：本期所有在职成员按数据算分 */
+  async function scoreAll() {
+    const targets = directory.filter(
+      (p) => p.status === 'active' && (p.employment_status ?? 'active') === 'active',
+    )
+    if (!targets.length) return push('没有可算分的在职成员', 'error')
+    setScoring(true)
+    let ok = 0
+    let failed = 0
+    try {
+      for (const p of targets) {
+        try {
+          await applyPerformanceScore(p.id, period)
+          ok += 1
+        } catch {
+          failed += 1
+        }
+      }
+      push(`已按真实数据重算 ${ok} 人的绩效${failed ? `，${failed} 人失败` : ''}`)
+      reload()
+    } finally {
+      setScoring(false)
+    }
+  }
+
   async function remove() {
     if (!toDelete) return
     setSaving(true)
@@ -315,6 +358,11 @@ export default function Performance() {
               options={periods.map((p) => ({ value: p, label: p }))}
               className="w-[120px]"
             />
+            {canEdit && (
+              <Button icon={<Sparkles className="w-3.5 h-3.5" />} onClick={scoreAll} loading={scoring}>
+                按数据算分
+              </Button>
+            )}
             {canEdit && (
               <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate}>
                 录入绩效
@@ -578,12 +626,16 @@ export default function Performance() {
                       <td className="px-4 py-2.5">
                         <div className="flex flex-wrap gap-1">
                           {KPI_FIELDS.filter((f) => review.kpi?.[f.key]).map((f) => (
-                            <span key={f.key} className="text-[10.5px] text-ink-500">
+                            <span key={f.key} className="text-[10.5px] text-ink-500 whitespace-nowrap">
                               {f.label} <b className="num text-ink-700">{num(review.kpi[f.key], 0)}</b>
                             </span>
                           ))}
                           {!review.kpi || Object.keys(review.kpi).length === 0 ? (
                             <span className="text-[10.5px] text-ink-300">未填分项</span>
+                          ) : review.auto_score !== null && review.auto_score !== undefined ? (
+                            <span className="ml-1 text-[9.5px] px-1 py-0.5 rounded bg-brand-50 text-brand-600 border border-brand-200/60 whitespace-nowrap">
+                              数据算分
+                            </span>
                           ) : null}
                         </div>
                       </td>
@@ -593,6 +645,17 @@ export default function Performance() {
                       <td className="px-4 py-2.5">
                         {canEdit ? (
                           <div className="flex items-center justify-end gap-0.5">
+                            <button
+                              className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50 disabled:opacity-40"
+                              title="按订单 / 采购 / 任务数据重算"
+                              disabled={scoringId === review.profile_id}
+                              onClick={() => {
+                                const person = personById.get(review.profile_id)
+                                if (person) scoreOne(person)
+                              }}
+                            >
+                              <Sparkles className="w-3.5 h-3.5" />
+                            </button>
                             <button
                               className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100"
                               title="编辑"

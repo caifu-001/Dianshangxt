@@ -1,9 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Coins, Download, Percent, Plus, Receipt, Trash2, TrendingDown, Wallet } from 'lucide-react'
+import { Coins, Download, Percent, Plus, Receipt, Trash2, TrendingDown, Users, Wallet } from 'lucide-react'
 import dayjs from 'dayjs'
-import { deleteRow, fetchRows, insertRow } from '../lib/db'
+import { callRpc, deleteRow, fetchRows, insertRow } from '../lib/db'
 import { EXPENSE_CATEGORY } from '../lib/constants'
-import type { Expense, Order, Store } from '../lib/types'
+import type { Department, Expense, Order, Store } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
   Badge,
@@ -15,12 +15,23 @@ import {
   LoadingBlock,
   Modal,
   PageHeader,
+  Segmented,
   Select,
   useToast,
 } from '../components/ui'
 import { DonutChart } from '../components/charts'
-import { cn, daysAgo, downloadTextFile, money, monthStart, pct, sum, toCsv, today } from '../lib/utils'
+import { cn, daysAgo, downloadTextFile, money, monthStart, num, pct, sum, toCsv, today } from '../lib/utils'
 import { convert, useFx } from '../lib/fx'
+
+/** 通讯录（team_directory）：利润归属需要姓名与部门 */
+interface DirectoryRow {
+  id: string
+  full_name: string | null
+  email: string | null
+  department_id: string | null
+  status: string
+  employment_status: string
+}
 
 const PRESETS = [
   { key: 'mtd', label: '本月', from: () => monthStart(), to: () => today() },
@@ -35,6 +46,7 @@ export default function Profit() {
   const [from, setFrom] = useState(monthStart())
   const [to, setTo] = useState(today())
   const [storeFilter, setStoreFilter] = useState('')
+  const [dim, setDim] = useState<'owner' | 'dept'>('owner')
   const fx = useFx()
   const [expenseOpen, setExpenseOpen] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -50,7 +62,7 @@ export default function Profit() {
   })
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [orders, expenses, stores] = await Promise.all([
+    const [orders, expenses, stores, directory, departments] = await Promise.all([
       fetchRows<Order>('orders', {
         filters: [
           ['order_date', 'gte', from],
@@ -65,8 +77,10 @@ export default function Profit() {
         order: { column: 'expense_date', ascending: false },
       }),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
+      callRpc<DirectoryRow[]>('team_directory').catch(() => [] as DirectoryRow[]),
+      fetchRows<Department>('departments', { order: { column: 'sort_order' } }).catch(() => [] as Department[]),
     ])
-    return { orders, expenses, stores }
+    return { orders, expenses, stores, directory, departments }
   }, [from, to])
 
   const scopedOrders = useMemo(
@@ -107,6 +121,65 @@ export default function Profit() {
   }, [scopedOrders, scopedExpenses, data, storeFilter, fx])
 
   const currency = pnl.base
+
+  /** 利润归属：把每一单的利润算到责任人 / 部门头上 */
+  const attribution = useMemo(() => {
+    const storeCurrency = new Map((data?.stores ?? []).map((s) => [s.id, s.currency]))
+    const cv = (value: number | string, storeId?: string | null) =>
+      convert(Number(value ?? 0), (storeId && storeCurrency.get(storeId)) || 'USD', pnl.base, fx)
+
+    const personById = new Map((data?.directory ?? []).map((m) => [m.id, m]))
+    const deptById = new Map((data?.departments ?? []).map((d) => [d.id, d]))
+    const bucket = new Map<string, { key: string; name: string; sub: string; orders: number; qty: number; sales: number; profit: number }>()
+
+    for (const o of scopedOrders) {
+      const person = o.owner_id ? personById.get(o.owner_id) : undefined
+      const dept = person?.department_id ? deptById.get(person.department_id) : undefined
+
+      if (dim === 'dept') {
+        const key = dept?.id ?? 'none'
+        if (!bucket.has(key)) {
+          bucket.set(key, {
+            key,
+            name: dept?.name ?? '未归部门',
+            sub: dept ? '部门' : '成员未挂部门',
+            orders: 0,
+            qty: 0,
+            sales: 0,
+            profit: 0,
+          })
+        }
+        const b = bucket.get(key)!
+        b.orders += 1
+        b.qty += Number(o.quantity)
+        b.sales += cv(o.gross_amount, o.store_id)
+        b.profit += cv(o.profit, o.store_id)
+      } else {
+        const key = o.owner_id ?? 'none'
+        if (!bucket.has(key)) {
+          bucket.set(key, {
+            key,
+            name: person?.full_name || person?.email || '未指派责任人',
+            sub: dept?.name ?? (person ? '未挂部门' : '订单没有填责任人'),
+            orders: 0,
+            qty: 0,
+            sales: 0,
+            profit: 0,
+          })
+        }
+        const b = bucket.get(key)!
+        b.orders += 1
+        b.qty += Number(o.quantity)
+        b.sales += cv(o.gross_amount, o.store_id)
+        b.profit += cv(o.profit, o.store_id)
+      }
+    }
+
+    const list = Array.from(bucket.values()).sort((a, b) => b.profit - a.profit)
+    const totalProfit = list.reduce((s, x) => s + x.profit, 0) || 1
+    return list.map((x) => ({ ...x, share: (x.profit / totalProfit) * 100, margin: x.sales ? (x.profit / x.sales) * 100 : 0 }))
+  }, [scopedOrders, data, dim, pnl.base, fx])
+
 
   const rows = [
     { label: '商品销售额', value: pnl.sales, kind: 'in' as const },
@@ -354,6 +427,82 @@ export default function Profit() {
                 </div>
               </div>
             </div>
+          </div>
+
+          <div className="card mt-3 overflow-hidden">
+            <div className="px-4 py-3 border-b border-ink-100 flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2 flex-1 min-w-[180px]">
+                <Users className="w-4 h-4 text-ink-400" />
+                <h3 className="text-[13.5px] font-semibold text-ink-900">利润归属</h3>
+                <span className="text-[11px] text-ink-400">每一单的净利润算到责任人 / 部门</span>
+              </div>
+              <Segmented
+                value={dim}
+                onChange={(v) => setDim(v as typeof dim)}
+                size="sm"
+                options={[
+                  { value: 'owner', label: '按责任人' },
+                  { value: 'dept', label: '按部门' },
+                ]}
+              />
+            </div>
+            {loading ? (
+              <LoadingBlock rows={4} />
+            ) : !attribution.length ? (
+              <EmptyState
+                icon={<Users className="w-5 h-5" />}
+                title="该周期没有可归属的订单"
+                description="在「订单管理」里给订单填上责任人，利润就会自动归集到这里，并用于绩效算分。"
+              />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[760px]">
+                  <thead>
+                    <tr>
+                      <th className="th">{dim === 'owner' ? '责任人' : '部门'}</th>
+                      <th className="th text-right">订单</th>
+                      <th className="th text-right">件数</th>
+                      <th className="th text-right">销售额</th>
+                      <th className="th text-right">净利润</th>
+                      <th className="th text-right">净利率</th>
+                      <th className="th w-[130px]">利润占比</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {attribution.map((x) => (
+                      <tr key={x.key} className="hover:bg-ink-50/60">
+                        <td className="td">
+                          <p className="text-[12.5px] font-medium text-ink-800 truncate max-w-[180px]">{x.name}</p>
+                          <p className="text-[10.5px] text-ink-400 truncate max-w-[180px]">{x.sub}</p>
+                        </td>
+                        <td className="td text-right num text-[12px] text-ink-600">{x.orders}</td>
+                        <td className="td text-right num text-[12px] text-ink-500">{x.qty}</td>
+                        <td className="td text-right num text-[12px] text-ink-700">{money(x.sales, currency, 0)}</td>
+                        <td className={cn('td text-right num text-[12.5px] font-semibold', x.profit >= 0 ? 'text-emerald-700' : 'text-rose-600')}>
+                          {money(x.profit, currency, 0)}
+                        </td>
+                        <td className="td text-right">
+                          <span className={cn('num text-[12px]', x.margin >= 15 ? 'text-emerald-600' : x.margin >= 5 ? 'text-amber-600' : 'text-rose-600')}>
+                            {pct(x.margin)}
+                          </span>
+                        </td>
+                        <td className="td">
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 h-1.5 rounded-full bg-ink-100 overflow-hidden">
+                              <div
+                                className={cn('h-full rounded-full', x.profit >= 0 ? 'bg-brand-500' : 'bg-rose-400')}
+                                style={{ width: `${Math.min(100, Math.abs(x.share))}%` }}
+                              />
+                            </div>
+                            <span className="num text-[10.5px] text-ink-500 w-9 text-right">{num(x.share, 0)}%</span>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           <div className="card mt-3 overflow-hidden">

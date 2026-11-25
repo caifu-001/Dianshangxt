@@ -1,9 +1,30 @@
 import { useMemo, useState } from 'react'
-import { Download, Pencil, Plus, Receipt, ShoppingCart, Trash2, Upload } from 'lucide-react'
+import {
+  ArrowRight,
+  Download,
+  GitBranch,
+  Pencil,
+  Plus,
+  Receipt,
+  ShoppingCart,
+  Trash2,
+  Undo2,
+  Upload,
+  PackageCheck,
+} from 'lucide-react'
 import dayjs from 'dayjs'
-import { deleteRow, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
+import { callRpc, deleteRow, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
 import { ORDER_STATUS } from '../lib/constants'
-import type { Order, Product, Store } from '../lib/types'
+import { useAuth } from '../context/AuthContext'
+import {
+  STOCK_STATE_META,
+  TRACE_META,
+  createPoFromShortage,
+  fetchOrderTrace,
+  fulfillOrder,
+  restoreOrderStock,
+} from '../lib/flow'
+import type { Order, Product, Store, Supplier, TraceEvent } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
   Badge,
@@ -47,6 +68,7 @@ interface FormState {
   other_fee: string
   status: Order['status']
   note: string
+  owner_id: string
 }
 
 const EMPTY: FormState = {
@@ -69,6 +91,7 @@ const EMPTY: FormState = {
   other_fee: '',
   status: 'delivered',
   note: '',
+  owner_id: '',
 }
 
 const IMPORT_FIELDS: ImportField[] = [
@@ -93,8 +116,31 @@ const toNum = (v: string | number | null | undefined) => {
   return Number.isFinite(n) ? n : 0
 }
 
+/** 通讯录（team_directory）：责任人下拉用，普通成员也能读到 */
+interface DirectoryRow {
+  id: string
+  full_name: string | null
+  email: string | null
+  status: string
+  employment_status: string
+}
+
+interface ShortagePrompt {
+  order: Order
+  available: number
+  need: number
+  shortage: number
+  warehouse: string
+  qty: string
+  supplier_id: string
+  unit_cost: string
+}
+
 export default function Orders() {
   const { push } = useToast()
+  const { user, can } = useAuth()
+  const canEdit = can('orders.edit')
+  const canBuy = can('purchase.edit')
   const [search, setSearch] = useState('')
   const [storeFilter, setStoreFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -109,10 +155,15 @@ export default function Orders() {
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState<Order | null>(null)
   const [confirmLoading, setConfirmLoading] = useState(false)
+  const [busyId, setBusyId] = useState('')
+  const [shortage, setShortage] = useState<ShortagePrompt | null>(null)
+  const [shortageSaving, setShortageSaving] = useState(false)
+  const [trace, setTrace] = useState<{ order: Order; timeline: TraceEvent[] } | null>(null)
+  const [traceLoading, setTraceLoading] = useState(false)
   const fx = useFx()
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [orders, stores, products] = await Promise.all([
+    const [orders, stores, products, directory, suppliers] = await Promise.all([
       fetchRows<Order>('orders', {
         filters: [
           ['order_date', 'gte', from],
@@ -123,9 +174,21 @@ export default function Orders() {
       }),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
       fetchRows<Product>('products'),
+      callRpc<DirectoryRow[]>('team_directory').catch(() => []),
+      fetchRows<Supplier>('suppliers', { filters: [['status', 'eq', 'active']] }).catch(() => []),
     ])
-    return { orders, stores, products }
+    return { orders, stores, products, directory, suppliers }
   }, [from, to])
+
+  /** 可选责任人：在职且账号正常的成员 */
+  const memberOptions = useMemo(
+    () =>
+      (data?.directory ?? [])
+        .filter((m) => m.status === 'active' && (m.employment_status ?? 'active') === 'active')
+        .map((m) => ({ value: m.id, label: m.full_name || m.email || '未命名' })),
+    [data],
+  )
+  const memberMap = useMemo(() => new Map((data?.directory ?? []).map((m) => [m.id, m])), [data])
 
   const storeMap = useMemo(() => new Map((data?.stores ?? []).map((s) => [s.id, s])), [data])
   const productMap = useMemo(() => new Map((data?.products ?? []).map((p) => [p.id, p])), [data])
@@ -149,6 +212,7 @@ export default function Orders() {
       profit: live.reduce((s, o) => s + cv(o.profit, o.store_id), 0),
       count: filtered.length,
       refund: filtered.reduce((s, o) => s + cv(o.refund_amount, o.store_id), 0),
+      pendingOut: live.filter((o) => (o.stock_state ?? 'pending') !== 'out').length,
     }
   }, [filtered, storeMap, fx])
 
@@ -171,7 +235,7 @@ export default function Orders() {
 
   function openCreate() {
     setEditing(null)
-    setForm({ ...EMPTY, store_id: storeFilter || data?.stores[0]?.id || '' })
+    setForm({ ...EMPTY, store_id: storeFilter || data?.stores[0]?.id || '', owner_id: user?.id ?? '' })
     setModalOpen(true)
   }
 
@@ -197,6 +261,7 @@ export default function Orders() {
       other_fee: String(order.other_fee),
       status: order.status,
       note: order.note ?? '',
+      owner_id: order.owner_id ?? '',
     })
     setModalOpen(true)
   }
@@ -266,6 +331,7 @@ export default function Orders() {
         other_fee: toNum(form.other_fee),
         status: form.status,
         note: form.note.trim() || null,
+        owner_id: form.owner_id || user?.id || null,
       }
       if (editing) {
         await updateRow('orders', editing.id, payload)
@@ -281,6 +347,96 @@ export default function Orders() {
       push(/duplicate|unique/i.test(msg) ? '该店铺下订单号已存在' : msg, 'error')
     } finally {
       setSaving(false)
+    }
+  }
+
+  /* ---------------- 出库与链路 ---------------- */
+
+  async function handleFulfill(order: Order, force = false) {
+    setBusyId(order.id)
+    try {
+      const res = await fulfillOrder(order.id, order.fulfillment_wh, force)
+      if (!res?.ok && res?.reason === 'shortage') {
+        const product = order.product_id ? productMap.get(order.product_id) : undefined
+        setShortage({
+          order,
+          available: res.available ?? 0,
+          need: res.need ?? order.quantity,
+          shortage: res.shortage ?? order.quantity,
+          warehouse: res.warehouse ?? 'FBA-US',
+          qty: String(res.shortage || order.quantity),
+          supplier_id: '',
+          unit_cost: String(product?.cost_price ?? 0),
+        })
+        return
+      }
+      if (force) setShortage(null)
+      push(force ? '已强制出库，库存可能出现负数' : `已出库，剩余可用 ${num(res?.available ?? 0)} 件`)
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '出库失败', 'error')
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  async function handleRestore(order: Order) {
+    setBusyId(order.id)
+    try {
+      const res = await restoreOrderStock(order.id)
+      if (res?.ok) {
+        push(`已退回库存 ${num(res.restored ?? 0)} 件`)
+        reload()
+      } else if (res?.reason === 'not_out') {
+        push('该订单还没出库，无需退回', 'error')
+      }
+    } catch (err) {
+      push(err instanceof Error ? err.message : '退回失败', 'error')
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  async function handleCreatePo() {
+    if (!shortage) return
+    const qty = Math.max(1, Math.round(toNum(shortage.qty)))
+    setShortageSaving(true)
+    try {
+      const res = await createPoFromShortage(
+        [
+          {
+            sku: shortage.order.sku ?? '',
+            title: shortage.order.title,
+            product_id: shortage.order.product_id,
+            qty,
+            unit_cost: toNum(shortage.unit_cost),
+          },
+        ],
+        shortage.supplier_id || null,
+        shortage.order.store_id,
+        shortage.order.id,
+      )
+      push(`已生成采购单 ${res.po_no}，到货后在「采购管理」入库即可回补库存`)
+      setShortage(null)
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '生成采购单失败', 'error')
+    } finally {
+      setShortageSaving(false)
+    }
+  }
+
+  async function openTrace(order: Order) {
+    setTrace({ order, timeline: [] })
+    setTraceLoading(true)
+    try {
+      const res = await fetchOrderTrace(order.id)
+      setTrace({ order, timeline: res.timeline ?? [] })
+    } catch (err) {
+      push(err instanceof Error ? err.message : '读取链路失败', 'error')
+      setTrace(null)
+    } finally {
+      setTraceLoading(false)
     }
   }
 
@@ -366,6 +522,9 @@ export default function Orders() {
       其他: o.other_fee,
       净利润: o.profit,
       状态: ORDER_STATUS[o.status]?.label ?? o.status,
+      出库: STOCK_STATE_META[o.stock_state ?? 'pending']?.label ?? '',
+      责任人: (o.owner_id && memberMap.get(o.owner_id)?.full_name) || '',
+      成本来源: o.cost_source === 'stock' ? '采购加权成本' : '手工填写',
     }))
     downloadTextFile(`订单明细_${from}_${to}.csv`, toCsv(rows), 'text/csv;charset=utf-8')
   }
@@ -390,11 +549,12 @@ export default function Orders() {
         }
       />
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-3">
         {[
           { label: '本期销售额 ≈USD', value: money(totals.sales, 'USD', 0), tone: 'text-ink-900' },
           { label: '本期净利润 ≈USD', value: money(totals.profit, 'USD', 0), tone: totals.profit >= 0 ? 'text-emerald-600' : 'text-rose-600' },
           { label: '订单数', value: num(totals.count), tone: 'text-ink-900' },
+          { label: '待出库', value: num(totals.pendingOut), tone: totals.pendingOut > 0 ? 'text-amber-600' : 'text-ink-900' },
           { label: '退款金额 ≈USD', value: money(totals.refund, 'USD', 0), tone: 'text-rose-600' },
         ].map((item) => (
           <div key={item.label} className="card px-4 py-3">
@@ -447,7 +607,7 @@ export default function Orders() {
           />
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1000px]">
+            <table className="w-full min-w-[1180px]">
               <thead>
                 <tr>
                   <th className="th">订单</th>
@@ -459,7 +619,8 @@ export default function Orders() {
                   <th className="th text-right">净利润</th>
                   <th className="th text-right">利润率</th>
                   <th className="th">状态</th>
-                  <th className="th w-16" />
+                  <th className="th">出库 / 责任人</th>
+                  <th className="th w-24" />
                 </tr>
               </thead>
               <tbody>
@@ -469,6 +630,8 @@ export default function Orders() {
                   const margin = Number(o.gross_amount) ? (Number(o.profit) / Number(o.gross_amount)) * 100 : 0
                   const status = ORDER_STATUS[o.status]
                   const currency = store?.currency ?? 'USD'
+                  const stockMeta = STOCK_STATE_META[o.stock_state ?? 'pending'] ?? STOCK_STATE_META.pending
+                  const ownerName = (o.owner_id && memberMap.get(o.owner_id)?.full_name) || '未指派'
                   return (
                     <tr key={o.id} className="hover:bg-ink-50/60 group">
                       <td className="td">
@@ -507,13 +670,61 @@ export default function Orders() {
                         <Badge tone={status?.tone ?? 'gray'}>{status?.label ?? o.status}</Badge>
                       </td>
                       <td className="td">
-                        <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEdit(o)}>
-                            <Pencil className="w-3.5 h-3.5" />
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={cn(
+                              'text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap',
+                              stockMeta.cls,
+                            )}
+                          >
+                            {stockMeta.label}
+                          </span>
+                          <span className="text-[11px] text-ink-500 truncate max-w-[72px]" title={ownerName}>
+                            {ownerName}
+                          </span>
+                        </div>
+                        {o.cost_source === 'stock' && (
+                          <p className="text-[9.5px] text-emerald-600 mt-0.5">成本取自采购入库</p>
+                        )}
+                      </td>
+                      <td className="td">
+                        <div className="flex items-center gap-0.5">
+                          {canEdit && o.status !== 'cancelled' && (
+                            o.stock_state === 'out' ? (
+                              <button
+                                className="p-1.5 rounded-md text-ink-400 hover:text-amber-600 hover:bg-amber-50 disabled:opacity-40"
+                                title="退回库存"
+                                disabled={busyId === o.id}
+                                onClick={() => handleRestore(o)}
+                              >
+                                <Undo2 className="w-3.5 h-3.5" />
+                              </button>
+                            ) : (
+                              <button
+                                className="p-1.5 rounded-md text-ink-400 hover:text-emerald-600 hover:bg-emerald-50 disabled:opacity-40"
+                                title="出库并扣减库存"
+                                disabled={busyId === o.id}
+                                onClick={() => handleFulfill(o)}
+                              >
+                                <PackageCheck className="w-3.5 h-3.5" />
+                              </button>
+                            )
+                          )}
+                          <button
+                            className="p-1.5 rounded-md text-ink-400 hover:text-brand-600 hover:bg-brand-50"
+                            title="查看全链路"
+                            onClick={() => openTrace(o)}
+                          >
+                            <GitBranch className="w-3.5 h-3.5" />
                           </button>
-                          <button data-perm="delete" className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => setDeleting(o)}>
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEdit(o)}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button data-perm="delete" className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50" onClick={() => setDeleting(o)}>
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
                       </td>
                     </tr>
@@ -623,6 +834,14 @@ export default function Orders() {
                   options={Object.entries(ORDER_STATUS).map(([value, v]) => ({ value, label: v.label }))}
                 />
               </Field>
+              <Field label="责任人" hint="这一单的业绩与利润算到他名下，绩效自动统计">
+                <Select
+                  value={form.owner_id}
+                  onChange={(v) => setForm({ ...form, owner_id: v })}
+                  options={memberOptions}
+                  placeholder="默认当前登录人"
+                />
+              </Field>
             </div>
           </div>
 
@@ -674,6 +893,133 @@ export default function Orders() {
           </Field>
         }
       />
+
+      {/* 缺货：订单驱动补货 */}
+      <Modal
+        open={!!shortage}
+        onClose={() => setShortage(null)}
+        title="库存不足，需要补货"
+        width="max-w-lg"
+        footer={
+          <>
+            <Button onClick={() => setShortage(null)}>取消</Button>
+            <Button onClick={() => shortage && handleFulfill(shortage.order, true)}>仍然出库</Button>
+            {canBuy && (
+              <Button variant="primary" loading={shortageSaving} onClick={handleCreatePo}>
+                生成采购单
+              </Button>
+            )}
+          </>
+        }
+      >
+        {shortage && (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-amber-200/70 bg-amber-50/70 px-3.5 py-3">
+              <p className="text-[12px] text-amber-900 font-medium">
+                {shortage.order.sku} · {shortage.order.title || '未命名商品'}
+              </p>
+              <p className="text-[11px] text-amber-700 mt-1">
+                仓库「{shortage.warehouse}」可用库存不够，无法直接出库。
+              </p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: '可用库存', value: num(shortage.available), tone: 'text-ink-800' },
+                { label: '本单需求', value: num(shortage.need), tone: 'text-ink-800' },
+                { label: '缺口', value: num(shortage.shortage), tone: 'text-rose-600' },
+              ].map((x) => (
+                <div key={x.label} className="rounded-lg border border-ink-200/70 bg-white px-3 py-2 text-center">
+                  <p className="text-[10.5px] text-ink-400">{x.label}</p>
+                  <p className={cn('num text-[15px] font-semibold mt-0.5', x.tone)}>{x.value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="采购数量">
+                <input
+                  className="input num"
+                  type="number"
+                  min="1"
+                  value={shortage.qty}
+                  onChange={(e) => setShortage({ ...shortage, qty: e.target.value })}
+                />
+              </Field>
+              <Field label="采购单价">
+                <input
+                  className="input num"
+                  type="number"
+                  step="0.01"
+                  value={shortage.unit_cost}
+                  onChange={(e) => setShortage({ ...shortage, unit_cost: e.target.value })}
+                />
+              </Field>
+            </div>
+
+            <Field label="指定供应商" hint="留空则先建单，稍后在采购管理里补">
+              <Select
+                value={shortage.supplier_id}
+                onChange={(v) => setShortage({ ...shortage, supplier_id: v })}
+                options={(data?.suppliers ?? []).map((x) => ({ value: x.id, label: x.name }))}
+                placeholder="（暂不指定）"
+              />
+            </Field>
+
+            <pre className="text-[10.5px] leading-relaxed text-ink-500 bg-ink-50 rounded-lg px-3 py-2 whitespace-pre-wrap font-sans">
+              生成的采购单会回指这张订单，之后在「采购管理」付款、到货入库，成本自动回流商品档案，
+              这张订单的利润会按实际采购成本重算。
+            </pre>
+          </div>
+        )}
+      </Modal>
+
+      {/* 单据链路：一张订单的完整闭环 */}
+      <Modal
+        open={!!trace}
+        onClose={() => setTrace(null)}
+        title={`单据链路 · ${trace?.order.order_no ?? ''}`}
+        width="max-w-2xl"
+        footer={<Button onClick={() => setTrace(null)}>关闭</Button>}
+      >
+        <div className="rounded-xl border border-ink-200/70 bg-ink-50/60 px-3.5 py-2.5 mb-4 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-600">
+          {['订单', '出库', '缺货补货', '采购付款', '到货入库'].map((x, i, arr) => (
+            <span key={x} className="flex items-center gap-1.5">
+              <span className="px-1.5 py-0.5 rounded bg-white border border-ink-200/70">{x}</span>
+              {i < arr.length - 1 && <ArrowRight className="w-3 h-3 text-ink-300" />}
+            </span>
+          ))}
+        </div>
+
+        {traceLoading ? (
+          <LoadingBlock rows={4} />
+        ) : !trace?.timeline.length ? (
+          <EmptyState
+            icon={<GitBranch className="w-5 h-5" />}
+            title="这条链路还没有后续动作"
+            description="订单出库后会记录扣库存流水；库存不足时生成的采购单、付款、入库也会自动串进来。"
+          />
+        ) : (
+          <ol className="relative ml-1 pl-4 border-l border-ink-200 space-y-3.5">
+            {trace.timeline.map((e, i) => {
+              const meta = TRACE_META[e.kind] ?? TRACE_META.order
+              const owner = (e.owner_id && memberMap.get(e.owner_id)?.full_name) || ''
+              return (
+                <li key={`${e.kind}-${i}`} className="relative">
+                  <span className={cn('absolute -left-[21px] top-1 w-2.5 h-2.5 rounded-full ring-2 ring-white', meta.dot)} />
+                  <div className="flex items-center gap-2">
+                    <span className={cn('text-[10px] font-medium', meta.cls)}>{meta.label}</span>
+                    <span className="text-[12.5px] font-medium text-ink-800">{e.title}</span>
+                    <span className="ml-auto num text-[10.5px] text-ink-400">{dayjs(e.ts).format('MM-DD HH:mm')}</span>
+                  </div>
+                  {e.detail && <p className="text-[11.5px] text-ink-500 mt-0.5 leading-relaxed">{e.detail}</p>}
+                  {owner && <p className="text-[10.5px] text-ink-400 mt-0.5">经手 {owner}</p>}
+                </li>
+              )
+            })}
+          </ol>
+        )}
+      </Modal>
 
       <ConfirmDialog
         open={!!deleting}

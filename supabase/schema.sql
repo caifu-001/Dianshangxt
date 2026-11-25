@@ -437,6 +437,49 @@ create table if not exists public.suppliers (
 create unique index if not exists uq_suppliers_name on public.suppliers(name);
 create index if not exists idx_suppliers_status on public.suppliers(status);
 
+-- 供应商管理库：老库升级只需补列，不覆盖已有值
+alter table public.suppliers
+  add column if not exists code              text,
+  add column if not exists contact_title     text,
+  add column if not exists fax               text,
+  add column if not exists website           text,
+  add column if not exists country           text,
+  add column if not exists city              text,
+  add column if not exists tax_no            text,
+  add column if not exists bank_name         text,
+  add column if not exists bank_account      text,
+  add column if not exists qualification     text,
+  add column if not exists tags              text[] not null default '{}',
+  add column if not exists owner_id          uuid references public.profiles(id) on delete set null,
+  add column if not exists cooperation_since date,
+  add column if not exists updated_at        timestamptz not null default now();
+create unique index if not exists uq_suppliers_code
+  on public.suppliers(lower(code)) where code is not null and btrim(code) <> '';
+create index if not exists idx_suppliers_owner on public.suppliers(owner_id);
+
+-- 供应商可供产品 / 报价：一家供应商可以供多个 SKU，同一 SKU 只留一条报价
+create table if not exists public.supplier_products (
+  id              uuid primary key default gen_random_uuid(),
+  user_id         uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  supplier_id     uuid not null references public.suppliers(id) on delete cascade,
+  product_id      uuid references public.products(id) on delete set null,
+  sku             text not null,
+  title           text,
+  unit            text not null default '件',
+  currency        text not null default 'CNY',
+  unit_cost       numeric(14,4) not null default 0 check (unit_cost >= 0),
+  moq             integer not null default 1 check (moq >= 1),
+  lead_time_days  integer not null default 30 check (lead_time_days >= 0),
+  status          text not null default 'active' check (status in ('active', 'paused')),
+  note            text,
+  created_at      timestamptz not null default now(),
+  updated_at      timestamptz not null default now()
+);
+create unique index if not exists uq_supplier_products_sku
+  on public.supplier_products(supplier_id, lower(sku));
+create index if not exists idx_supplier_products_supplier on public.supplier_products(supplier_id);
+create index if not exists idx_supplier_products_product on public.supplier_products(product_id);
+
 create table if not exists public.purchase_orders (
   id            uuid primary key default gen_random_uuid(),
   user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -536,6 +579,109 @@ create table if not exists public.performance_reviews (
 );
 create index if not exists idx_perf_period on public.performance_reviews(period, score desc);
 create index if not exists idx_perf_profile on public.performance_reviews(profile_id);
+
+-- -------------------------------------------------------------
+-- 15. 业务链路：订单 → 出库 → 缺货 → 采购 → 付款 → 入库 → 成本 → 利润 → 绩效
+--
+--     一张单子的完整闭环：
+--       orders                     卖出（带责任人 owner_id）
+--         └→ stock_movements(out)  出库：扣 inventory.available_qty，写流水
+--              └→ 库存不足          shortage_plan() 给出补货建议
+--                   └→ purchase_orders  采购（带采购员 buyer_id，可回指缺货订单）
+--                        ├→ purchase_payments  付款登记 → 付款状态自动维护
+--                        └→ stock_movements(in) 到货入库
+--                             ├→ 加权成本 → products.cost_price
+--                             └→ orders.cost_amount 回填 → orders.profit 生成列自动重算
+--      每张单据都带人员字段，绩效与利润可以按人 / 按部门归集。
+-- -------------------------------------------------------------
+
+-- 订单：责任人 + 出库状态 + 成本来源
+alter table public.orders add column if not exists owner_id        uuid references public.profiles(id) on delete set null;
+alter table public.orders add column if not exists stock_state     text not null default 'pending';
+alter table public.orders add column if not exists fulfilled_at    timestamptz;
+alter table public.orders add column if not exists fulfillment_wh  text;
+alter table public.orders add column if not exists cost_source     text not null default 'manual';
+do $$ begin
+  alter table public.orders drop constraint if exists orders_stock_state_chk;
+  alter table public.orders add constraint orders_stock_state_chk
+    check (stock_state in ('pending', 'out', 'returned'));
+  alter table public.orders drop constraint if exists orders_cost_source_chk;
+  alter table public.orders add constraint orders_cost_source_chk
+    check (cost_source in ('manual', 'stock'));
+end $$;
+create index if not exists idx_orders_owner on public.orders(owner_id);
+create index if not exists idx_orders_sku   on public.orders(sku);
+
+-- 采购单：采购员 + 付款状态 + 来源（手工 / 缺货补货 / 订单驱动）
+alter table public.purchase_orders add column if not exists buyer_id       uuid references public.profiles(id) on delete set null;
+alter table public.purchase_orders add column if not exists payment_status text not null default 'unpaid';
+alter table public.purchase_orders add column if not exists paid_amount    numeric(14,2) not null default 0;
+alter table public.purchase_orders add column if not exists source         text not null default 'manual';
+alter table public.purchase_orders add column if not exists source_order_id uuid references public.orders(id) on delete set null;
+alter table public.purchase_orders add column if not exists received_at    timestamptz;
+do $$ begin
+  alter table public.purchase_orders drop constraint if exists purchase_orders_payment_chk;
+  alter table public.purchase_orders add constraint purchase_orders_payment_chk
+    check (payment_status in ('unpaid', 'partial', 'paid'));
+  alter table public.purchase_orders drop constraint if exists purchase_orders_source_chk;
+  alter table public.purchase_orders add constraint purchase_orders_source_chk
+    check (source in ('manual', 'shortage', 'order'));
+end $$;
+create index if not exists idx_po_buyer  on public.purchase_orders(buyer_id);
+create index if not exists idx_po_source on public.purchase_orders(source_order_id);
+
+-- 任务：责任人（真人员，不是字符串）+ 单据关联，让协作可回溯
+alter table public.tasks add column if not exists owner_id uuid references public.profiles(id) on delete set null;
+alter table public.tasks add column if not exists ref_type text;   -- order / purchase / product / competitor
+alter table public.tasks add column if not exists ref_id   uuid;
+alter table public.tasks add column if not exists ref_no   text;
+create index if not exists idx_tasks_owner on public.tasks(owner_id);
+
+-- 绩效：自动算分留痕（人工改分不会被覆盖，只留 metrics 快照）
+alter table public.performance_reviews add column if not exists metrics    jsonb not null default '{}'::jsonb;
+alter table public.performance_reviews add column if not exists auto_score  numeric(4,1);
+alter table public.performance_reviews add column if not exists auto_grade  text;
+
+-- 库存流水：唯一的库存变动底账，inventory.available_qty 是它的累计结果
+create table if not exists public.stock_movements (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  store_id   uuid references public.stores(id) on delete set null,
+  product_id uuid references public.products(id) on delete set null,
+  sku        text not null,
+  title      text,
+  warehouse  text not null default 'FBA-US',
+  move_type  text not null check (move_type in ('in', 'out', 'adjust', 'return')),
+  qty        integer not null,                        -- 有符号：入库 +，出库 -
+  unit_cost  numeric(12,2) not null default 0,        -- 入库成本（用于 SKU 加权成本）
+  ref_type   text check (ref_type in ('order', 'purchase', 'manual')),
+  ref_id     uuid,
+  ref_no     text,                                    -- 单号快照，单据被删也能看懂
+  owner_id   uuid references public.profiles(id) on delete set null,
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_moves_sku  on public.stock_movements(sku, created_at desc);
+create index if not exists idx_moves_ref  on public.stock_movements(ref_type, ref_id);
+create index if not exists idx_moves_time on public.stock_movements(created_at desc);
+create index if not exists idx_moves_owner on public.stock_movements(owner_id);
+
+-- 采购付款：一张采购单可以分多次付款
+create table if not exists public.purchase_payments (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  po_id      uuid not null references public.purchase_orders(id) on delete cascade,
+  amount     numeric(14,2) not null default 0,
+  currency   text not null default 'CNY',
+  paid_at    date not null default current_date,
+  method     text not null default 'bank',   -- bank / alipay / wechat / cash / other
+  voucher_no text,
+  payer_id   uuid references public.profiles(id) on delete set null,
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_payments_po   on public.purchase_payments(po_id, paid_at desc);
+create index if not exists idx_payments_time on public.purchase_payments(paid_at desc);
 
 -- =============================================================
 --  行级安全（RLS）与角色权限
@@ -683,7 +829,7 @@ declare
     'campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
     'departments','positions','roles','access_requests','employee_events',
-    'performance_reviews'
+    'performance_reviews','stock_movements','purchase_payments'
   ];
 begin
   foreach t in array tabs loop
@@ -796,7 +942,10 @@ begin
   for rec in
     select * from (values
       ('competitor_snapshots', 'competitors'),
-      ('purchase_items',       'purchase')
+      ('purchase_items',       'purchase'),
+      ('purchase_payments',    'purchase'),
+      ('stock_movements',      'inventory'),
+      ('supplier_products',    'purchase')
     ) as v(tbl, perm)
   loop
     execute format('drop policy if exists %I on public.%I', rec.tbl || '_select', rec.tbl);
@@ -1020,7 +1169,7 @@ declare
   to_name text;
   tabs  text[] := array[
     'stores','products','orders','inventory','campaigns','creators','tasks','expenses',
-    'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items'
+    'competitors','competitor_snapshots','suppliers','supplier_products','purchase_orders','purchase_items'
   ];
 begin
   if not (public.is_staff() or public.has_permission('hr.manage')) then
@@ -1293,15 +1442,705 @@ create unique index if not exists uq_inventory_sku on public.inventory(store_id,
 drop index if exists uq_orders_no;
 create unique index if not exists uq_orders_no on public.orders(store_id, order_no);
 
+-- =============================================================
+--  16. 业务链路函数
+--      所有写操作都走函数：库存、成本、付款、状态的变更必须原子完成，
+--      前端直接 update 表会留下「库存扣了但单子没标出库」这类脏数据。
+-- =============================================================
+
+-- ---------- SKU 加权采购成本 ----------
+-- 用全部入库流水的加权平均作为当前成本，采购价波动会自然反映到利润上。
+create or replace function public.sku_avg_cost(p_sku text)
+returns numeric
+language sql stable security definer set search_path = public
+as $$
+  select coalesce(
+    (select round(sum(qty * unit_cost) / nullif(sum(qty), 0), 2)
+       from public.stock_movements
+      where sku = p_sku and qty > 0 and unit_cost > 0),
+    0);
+$$;
+
+-- ---------- 库存增减（唯一入口） ----------
+create or replace function public.bump_inventory(
+  p_store_id   uuid,
+  p_product_id uuid,
+  p_sku        text,
+  p_warehouse  text,
+  p_delta      integer,
+  p_title      text default null
+) returns integer
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_user uuid;
+  v_qty  integer;
+begin
+  if p_store_id is null or coalesce(btrim(p_sku), '') = '' then
+    return null;                       -- 国内仓或没绑 SKU 时不动店铺库存
+  end if;
+
+  select coalesce(user_id, auth.uid()) into v_user from public.stores where id = p_store_id;
+  v_user := coalesce(v_user, auth.uid());
+
+  insert into public.inventory (user_id, store_id, product_id, sku, title, warehouse, available_qty)
+  values (v_user, p_store_id, p_product_id, btrim(p_sku), p_title,
+          coalesce(nullif(btrim(coalesce(p_warehouse, '')), ''), 'FBA-US'), p_delta)
+  on conflict (user_id, store_id, sku, warehouse)
+  do update set available_qty = inventory.available_qty + p_delta,
+                product_id    = coalesce(inventory.product_id, excluded.product_id),
+                title         = coalesce(inventory.title, excluded.title),
+                updated_at    = now()
+  returning available_qty into v_qty;
+
+  return v_qty;
+end;
+$$;
+
+-- ---------- 订单出库：扣库存 + 写流水 + 回填成本 ----------
+-- 库存不足时不抛异常而是返回 ok=false，前端可以顺势引导「生成补货采购单」。
+create or replace function public.fulfill_order(
+  p_order_id  uuid,
+  p_warehouse text    default null,
+  p_force     boolean default false
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  o       record;
+  v_wh    text;
+  v_avail integer;
+  v_qty   integer;
+  v_cost  numeric(12,2);
+begin
+  if not public.has_permission('orders.edit') then
+    raise exception '没有订单编辑权限';
+  end if;
+
+  select * into o from public.orders where id = p_order_id for update;
+  if not found then raise exception '订单不存在'; end if;
+
+  if o.stock_state = 'out' then
+    return jsonb_build_object('ok', true, 'already', true, 'available', 0);
+  end if;
+
+  v_wh  := coalesce(nullif(btrim(coalesce(p_warehouse, '')), ''), o.fulfillment_wh, 'FBA-US');
+  v_qty := greatest(1, o.quantity);
+
+  select coalesce(sum(available_qty), 0) into v_avail
+    from public.inventory
+   where store_id = o.store_id and sku = o.sku and warehouse = v_wh;
+
+  if v_qty > v_avail and not p_force then
+    return jsonb_build_object(
+      'ok', false, 'reason', 'shortage',
+      'available', v_avail, 'need', v_qty, 'shortage', v_qty - v_avail,
+      'warehouse', v_wh, 'sku', o.sku);
+  end if;
+
+  v_cost := public.sku_avg_cost(o.sku);
+
+  insert into public.stock_movements
+    (user_id, store_id, product_id, sku, title, warehouse, move_type, qty, unit_cost,
+     ref_type, ref_id, ref_no, owner_id, note)
+  values
+    (o.user_id, o.store_id, o.product_id, o.sku, o.title, v_wh, 'out', -v_qty, v_cost,
+     'order', o.id, o.order_no, coalesce(o.owner_id, auth.uid()), '订单出库');
+
+  perform public.bump_inventory(o.store_id, o.product_id, o.sku, v_wh, -v_qty, o.title);
+
+  update public.orders
+     set stock_state    = 'out',
+         fulfilled_at   = now(),
+         fulfillment_wh = v_wh,
+         cost_source    = case when v_cost > 0 then 'stock' else cost_source end,
+         cost_amount    = case when v_cost > 0 then round(v_cost * greatest(1, quantity), 2) else cost_amount end
+   where id = o.id;
+
+  return jsonb_build_object('ok', true, 'available', v_avail - v_qty,
+                            'warehouse', v_wh, 'unit_cost', v_cost);
+end;
+$$;
+
+-- ---------- 撤销出库（取消 / 退款时把货退回库存） ----------
+create or replace function public.restore_order_stock(p_order_id uuid)
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  o record;
+  m record;
+  v_back integer := 0;
+begin
+  if not public.has_permission('orders.edit') then
+    raise exception '没有订单编辑权限';
+  end if;
+
+  select * into o from public.orders where id = p_order_id for update;
+  if not found then raise exception '订单不存在'; end if;
+  if o.stock_state <> 'out' then
+    return jsonb_build_object('ok', false, 'reason', 'not_out');
+  end if;
+
+  for m in
+    select * from public.stock_movements
+     where ref_type = 'order' and ref_id = p_order_id and move_type = 'out'
+  loop
+    insert into public.stock_movements
+      (user_id, store_id, product_id, sku, title, warehouse, move_type, qty, unit_cost,
+       ref_type, ref_id, ref_no, owner_id, note)
+    values
+      (m.user_id, m.store_id, m.product_id, m.sku, m.title, m.warehouse, 'return', -m.qty, m.unit_cost,
+       'order', o.id, o.order_no, m.owner_id, '出库撤销');
+
+    perform public.bump_inventory(m.store_id, m.product_id, m.sku, m.warehouse, -m.qty, m.title);
+    v_back := v_back + (-m.qty);
+  end loop;
+
+  update public.orders set stock_state = 'returned' where id = o.id;
+  return jsonb_build_object('ok', true, 'restored', v_back);
+end;
+$$;
+
+-- ---------- 采购单应付总额 ----------
+create or replace function public.po_total(p_po_id uuid)
+returns numeric
+language sql stable security definer set search_path = public
+as $$
+  select coalesce((select sum(amount) from public.purchase_items where po_id = p_po_id), 0)
+       + coalesce((select shipping_fee + other_fee from public.purchase_orders where id = p_po_id), 0);
+$$;
+
+-- ---------- 付款登记：自动维护已付金额与付款状态 ----------
+create or replace function public.register_payment(
+  p_po_id    uuid,
+  p_amount   numeric,
+  p_paid_at  date default current_date,
+  p_method   text default 'bank',
+  p_voucher  text default null,
+  p_note     text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  po       record;
+  v_paid   numeric(14,2);
+  v_total  numeric(14,2);
+  v_status text;
+begin
+  if not public.has_permission('purchase.edit') then
+    raise exception '没有采购编辑权限';
+  end if;
+  if coalesce(p_amount, 0) <= 0 then
+    raise exception '付款金额必须大于 0';
+  end if;
+
+  select * into po from public.purchase_orders where id = p_po_id for update;
+  if not found then raise exception '采购单不存在'; end if;
+
+  insert into public.purchase_payments
+    (user_id, po_id, amount, currency, paid_at, method, voucher_no, payer_id, note)
+  values
+    (po.user_id, po.id, round(p_amount, 2), po.currency, coalesce(p_paid_at, current_date),
+     coalesce(nullif(btrim(coalesce(p_method, '')), ''), 'bank'), p_voucher, auth.uid(), p_note);
+
+  select coalesce(sum(amount), 0) into v_paid from public.purchase_payments where po_id = po.id;
+  v_total  := public.po_total(po.id);
+  v_status := case when v_paid <= 0 then 'unpaid'
+                   when v_paid + 0.01 >= v_total then 'paid'
+                   else 'partial' end;
+
+  update public.purchase_orders
+     set paid_amount = v_paid, payment_status = v_status, updated_at = now()
+   where id = po.id;
+
+  return jsonb_build_object('ok', true, 'paid', v_paid, 'total', v_total, 'status', v_status);
+end;
+$$;
+
+-- ---------- 采购到货入库：写流水 + 加库存 + 回流加权成本 + 刷状态 ----------
+create or replace function public.receive_purchase(
+  p_po_id     uuid,
+  p_lines     jsonb,                -- [{item_id, qty, unit_cost}]
+  p_warehouse text default null,
+  p_note      text default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  po       record;
+  line     jsonb;
+  it       record;
+  i        integer;
+  v_qty    integer;
+  v_remain integer;
+  v_cost   numeric(12,2);
+  v_wh     text;
+  v_total  integer := 0;
+  v_done   boolean;
+  v_any    boolean := false;
+  v_skus   text[] := '{}';
+  v_rows   jsonb := '[]'::jsonb;
+begin
+  if not public.has_permission('purchase.edit') then
+    raise exception '没有采购编辑权限';
+  end if;
+
+  select * into po from public.purchase_orders where id = p_po_id for update;
+  if not found then raise exception '采购单不存在'; end if;
+  if po.status = 'cancelled' then
+    raise exception '已取消的采购单不能入库';
+  end if;
+
+  v_wh := coalesce(nullif(btrim(coalesce(p_warehouse, '')), ''), po.warehouse, '国内仓');
+
+  for line in select * from jsonb_array_elements(coalesce(p_lines, '[]'::jsonb)) loop
+    select * into it from public.purchase_items
+     where id = (line->>'item_id')::uuid and po_id = p_po_id
+     for update;
+    if not found then continue; end if;
+
+    v_remain := greatest(0, it.quantity - it.received_qty);
+    v_qty    := least(v_remain, greatest(0, round(coalesce((line->>'qty')::numeric, 0))::integer));
+    if v_qty <= 0 then continue; end if;
+
+    v_cost := coalesce(nullif((line->>'unit_cost')::numeric, 0), it.unit_price, 0);
+
+    update public.purchase_items set received_qty = received_qty + v_qty where id = it.id;
+
+    insert into public.stock_movements
+      (user_id, store_id, product_id, sku, title, warehouse, move_type, qty, unit_cost,
+       ref_type, ref_id, ref_no, owner_id, note)
+    values
+      (po.user_id, po.store_id, it.product_id, it.sku, it.title, v_wh, 'in', v_qty, v_cost,
+       'purchase', po.id, po.po_no, coalesce(po.buyer_id, auth.uid()),
+       coalesce(nullif(btrim(coalesce(p_note, '')), ''), '采购入库'));
+
+    if po.store_id is not null then
+      perform public.bump_inventory(po.store_id, it.product_id, it.sku, v_wh, v_qty, it.title);
+    end if;
+
+    v_skus  := array_append(v_skus, it.sku);
+    v_rows  := v_rows || jsonb_build_object('sku', it.sku, 'qty', v_qty, 'unit_cost', v_cost);
+    v_total := v_total + v_qty;
+    v_any   := true;
+  end loop;
+
+  if not v_any then
+    return jsonb_build_object('ok', false, 'reason', 'empty', 'message', '没有可入库的数量');
+  end if;
+
+  -- 采购价回流商品档案：后续订单的成本与利润自动跟着变
+  for i in 1 .. coalesce(array_length(v_skus, 1), 0) loop
+    update public.products p
+       set cost_price = c.avg_cost
+      from (select public.sku_avg_cost(v_skus[i]) as avg_cost) c
+     where p.sku = v_skus[i] and c.avg_cost > 0;
+  end loop;
+
+  select bool_and(received_qty >= quantity) into v_done
+    from public.purchase_items where po_id = po.id;
+
+  update public.purchase_orders
+     set status      = case when v_done then 'received' else 'partial' end,
+         received_at = case when v_done then now() else received_at end,
+         updated_at  = now()
+   where id = po.id;
+
+  return jsonb_build_object('ok', true, 'received', v_total, 'lines', v_rows,
+                            'status', case when v_done then 'received' else 'partial' end);
+end;
+$$;
+
+-- ---------- 缺货补货建议：销量 × 交期 + 安全库存 − 可用 − 在途 ----------
+create or replace function public.shortage_plan(p_store_id uuid default null)
+returns table (
+  sku         text,
+  title       text,
+  product_id  uuid,
+  store_id    uuid,
+  available   bigint,
+  inbound     bigint,
+  safety      bigint,
+  avg_daily   numeric,
+  days_cover  numeric,
+  suggest_qty integer,
+  lead_time   integer
+)
+language plpgsql stable security definer set search_path = public
+as $$
+#variable_conflict use_column
+begin
+  return query
+  with lead as (
+    select coalesce(round(avg(lead_time_days))::integer, 30) as d
+      from public.suppliers where status = 'active'
+  ),
+  sales as (
+    select o.sku, o.store_id, sum(o.quantity)::numeric / 30.0 as daily
+      from public.orders o
+     where o.order_date >= current_date - 30
+       and o.status not in ('cancelled', 'refunded')
+       and coalesce(btrim(o.sku), '') <> ''
+     group by o.sku, o.store_id
+  ),
+  inv as (
+    select i.sku, i.store_id,
+           sum(i.available_qty)::bigint            as available,
+           sum(i.inbound_qty)::bigint              as inbound,
+           max(i.safety_stock)::bigint             as safety,
+           max(i.title)                            as title,
+           max(i.product_id::text)::uuid           as product_id
+      from public.inventory i
+     group by i.sku, i.store_id
+  ),
+  po as (
+    select pi.sku, p.store_id, sum(pi.quantity - pi.received_qty)::bigint as inbound_po
+      from public.purchase_items pi
+      join public.purchase_orders p on p.id = pi.po_id
+     where p.status in ('ordered', 'partial')
+     group by pi.sku, p.store_id
+  ),
+  merged as (
+    select coalesce(s.sku, i.sku)                  as sku,
+           coalesce(i.store_id, s.store_id)        as store_id,
+           i.title, i.product_id,
+           coalesce(i.available, 0)                as available,
+           coalesce(i.inbound, 0) + coalesce(po.inbound_po, 0) as inbound,
+           coalesce(i.safety, 0)                   as safety,
+           coalesce(s.daily, 0)                    as daily
+      from sales s
+      full join inv i on i.sku = s.sku and i.store_id = s.store_id
+      left join po on po.sku = coalesce(s.sku, i.sku)
+                  and po.store_id = coalesce(i.store_id, s.store_id)
+  )
+  select m.sku, m.title, m.product_id, m.store_id,
+         m.available, m.inbound, m.safety,
+         round(m.daily, 2)                                                  as avg_daily,
+         case when m.daily > 0 then round((m.available + m.inbound) / m.daily, 1) else null end as days_cover,
+         greatest(0, ceil(m.daily * l.d + m.safety - m.available - m.inbound))::integer as suggest_qty,
+         l.d                                                                as lead_time
+    from merged m cross join lead l
+   where (p_store_id is null or m.store_id = p_store_id)
+     and greatest(0, ceil(m.daily * l.d + m.safety - m.available - m.inbound)) > 0
+   order by greatest(0, ceil(m.daily * l.d + m.safety - m.available - m.inbound)) desc
+   limit 200;
+end;
+$$;
+
+-- ---------- 一键把缺货建议生成采购单（订单驱动补货） ----------
+create or replace function public.create_po_from_shortage(
+  p_lines       jsonb,                -- [{sku,title,product_id,qty,unit_cost}]
+  p_supplier_id uuid default null,
+  p_store_id    uuid default null,
+  p_order_id    uuid default null
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_po_id  uuid;
+  v_po_no  text;
+  v_seq    integer;
+  v_prefix text;
+  v_sku    text;
+  line     jsonb;
+  v_count  integer := 0;
+  v_amt    numeric(14,2) := 0;
+  v_lead   integer := 30;
+begin
+  if not public.has_permission('purchase.edit') then
+    raise exception '没有采购编辑权限';
+  end if;
+  if coalesce(jsonb_array_length(coalesce(p_lines, '[]'::jsonb)), 0) = 0 then
+    raise exception '没有需要采购的商品';
+  end if;
+
+  v_prefix := 'PO' || to_char(current_date, 'YYYYMMDD') || '-';
+  select coalesce(max(substring(po_no from '([0-9]+)$')::integer), 0) + 1
+    into v_seq
+    from public.purchase_orders
+   where po_no like v_prefix || '%';
+  v_po_no := v_prefix || lpad(v_seq::text, 3, '0');
+
+  if p_supplier_id is not null then
+    select coalesce(lead_time_days, 30) into v_lead
+      from public.suppliers where id = p_supplier_id;
+  end if;
+
+  insert into public.purchase_orders
+    (user_id, po_no, supplier_id, store_id, warehouse, order_date, expected_date,
+     status, source, source_order_id, buyer_id)
+  values
+    (auth.uid(), v_po_no, p_supplier_id, p_store_id, '国内仓',
+     current_date, current_date + coalesce(v_lead, 30), 'draft',
+     case when p_order_id is null then 'shortage' else 'order' end,
+     p_order_id, auth.uid())
+  returning id into v_po_id;
+
+  for line in select * from jsonb_array_elements(p_lines) loop
+    v_sku := nullif(btrim(coalesce(line->>'sku', '')), '');
+    if v_sku is null then continue; end if;
+
+    insert into public.purchase_items (user_id, po_id, product_id, sku, title, quantity, unit_price)
+    values (auth.uid(), v_po_id, nullif(line->>'product_id', '')::uuid, v_sku,
+            nullif(line->>'title', ''), greatest(1, round(coalesce((line->>'qty')::numeric, 1))::integer),
+            coalesce((line->>'unit_cost')::numeric, 0));
+
+    v_count := v_count + 1;
+    v_amt   := v_amt + greatest(1, round(coalesce((line->>'qty')::numeric, 1)))::numeric
+                     * coalesce((line->>'unit_cost')::numeric, 0);
+  end loop;
+
+  if v_count = 0 then
+    delete from public.purchase_orders where id = v_po_id;
+    raise exception '没有有效的采购明细';
+  end if;
+
+  return jsonb_build_object('ok', true, 'po_id', v_po_id, 'po_no', v_po_no,
+                            'lines', v_count, 'amount', round(v_amt, 2));
+end;
+$$;
+
+-- ---------- 单据全链路追踪：一张订单从卖出到补货结算的时间线 ----------
+create or replace function public.order_trace(p_order_id uuid)
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_order  record;
+  v_result jsonb;
+begin
+  if not public.has_permission('orders.view') then
+    raise exception '没有订单查看权限';
+  end if;
+
+  select * into v_order from public.orders where id = p_order_id;
+  if not found then raise exception '订单不存在'; end if;
+
+  select coalesce(jsonb_agg(row_to_json(x)::jsonb order by x.ts), '[]'::jsonb) into v_result
+  from (
+    select o.created_at as ts, 'order'::text as kind, '订单创建'::text as title,
+           concat(o.order_no, ' · ', o.quantity, ' 件 · 单价 ', o.unit_price,
+                  ' ', coalesce((select currency from public.stores where id = o.store_id), 'USD')) as detail,
+           null::text as ref_no, o.owner_id
+      from public.orders o where o.id = p_order_id
+    union all
+    select m.created_at, 'out', '出库扣减',
+           concat('仓库 ', m.warehouse, ' · ', abs(m.qty), ' 件 · 单位成本 ', m.unit_cost),
+           m.ref_no, m.owner_id
+      from public.stock_movements m
+     where m.ref_type = 'order' and m.ref_id = p_order_id
+    union all
+    select p.created_at, 'purchase', '生成采购单',
+           concat(p.po_no, ' · ', coalesce((select name from public.suppliers where id = p.supplier_id), '未指定供应商'),
+                  ' · ', p.status),
+           p.po_no, p.buyer_id
+      from public.purchase_orders p
+     where p.source_order_id = p_order_id
+    union all
+    select pay.created_at, 'payment', '采购付款',
+           concat(pay.amount, ' ', pay.currency, ' · ', pay.method),
+           (select po_no from public.purchase_orders where id = pay.po_id), pay.payer_id
+      from public.purchase_payments pay
+      join public.purchase_orders p on p.id = pay.po_id
+     where p.source_order_id = p_order_id
+    union all
+    select m.created_at, 'in', '采购入库',
+           concat('仓库 ', m.warehouse, ' · ', m.qty, ' 件 · 单位成本 ', m.unit_cost),
+           m.ref_no, m.owner_id
+      from public.stock_movements m
+      join public.purchase_orders p on p.id = m.ref_id
+     where m.ref_type = 'purchase' and p.source_order_id = p_order_id
+    union all
+    select t.created_at, 'task', '关联任务',
+           concat(t.title, ' · ', t.status), t.ref_no, t.owner_id
+      from public.tasks t
+     where t.ref_type = 'order' and t.ref_id = p_order_id
+  ) x;
+
+  return jsonb_build_object('order', to_jsonb(v_order), 'timeline', v_result);
+end;
+$$;
+
+-- ---------- 人员指标：从订单 / 任务 / 采购里算，不再靠手工填分 ----------
+create or replace function public.member_metrics(p_profile_id uuid, p_period text)
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_start      date;
+  v_end        date;
+  v_prev_start date;
+  v_prev_end   date;
+  v_orders     integer := 0;
+  v_gmv        numeric := 0;
+  v_profit     numeric := 0;
+  v_prev_profit numeric := 0;
+  v_team_max   numeric := 0;
+  v_tasks      integer := 0;
+  v_done       integer := 0;
+  v_ontime     integer := 0;
+  v_pos        integer := 0;
+  v_po_amt     numeric := 0;
+  v_units      integer := 0;
+  v_sales      numeric;
+  v_exec       numeric;
+  v_collab     numeric;
+  v_growth     numeric;
+  v_score      numeric;
+  v_grade      text;
+begin
+  if not (public.has_permission('performance.view') or p_profile_id = auth.uid()) then
+    raise exception '没有绩效查看权限';
+  end if;
+
+  if p_period ~ '^[0-9]{4}-Q[1-4]$' then
+    v_start := make_date(split_part(p_period, '-', 1)::integer,
+                         (right(p_period, 1)::integer - 1) * 3 + 1, 1);
+    v_end   := (v_start + interval '3 month' - interval '1 day')::date;
+  else
+    v_start := to_date(p_period || '-01', 'YYYY-MM-DD');
+    v_end   := (v_start + interval '1 month' - interval '1 day')::date;
+  end if;
+  v_prev_end   := v_start - 1;
+  v_prev_start := (v_start - (v_end - v_start + 1))::date;
+
+  -- 销售：按订单责任人归集
+  select count(*), coalesce(sum(gross_amount), 0), coalesce(sum(profit), 0), coalesce(sum(quantity), 0)
+    into v_orders, v_gmv, v_profit, v_units
+    from public.orders
+   where owner_id = p_profile_id
+     and order_date between v_start and v_end
+     and status <> 'cancelled';
+
+  select coalesce(sum(profit), 0) into v_prev_profit
+    from public.orders
+   where owner_id = p_profile_id
+     and order_date between v_prev_start and v_prev_end
+     and status <> 'cancelled';
+
+  select coalesce(max(t), 0) into v_team_max
+    from (
+      select sum(profit) as t from public.orders
+       where owner_id is not null
+         and order_date between v_start and v_end
+         and status <> 'cancelled'
+       group by owner_id
+    ) s;
+
+  -- 任务：完成率与按时率
+  select count(*),
+         count(*) filter (where status = 'done'),
+         count(*) filter (where status = 'done'
+                            and (due_date is null or completed_at::date <= due_date))
+    into v_tasks, v_done, v_ontime
+    from public.tasks
+   where owner_id = p_profile_id
+     and created_at::date between v_start and v_end;
+
+  -- 采购：单量与金额
+  select count(*), coalesce(sum(public.po_total(id)), 0)
+    into v_pos, v_po_amt
+    from public.purchase_orders
+   where buyer_id = p_profile_id
+     and order_date between v_start and v_end;
+
+  -- 四个分项：销售看团队相对位置，执行看任务完成，协作看按时率，成长看环比
+  if v_team_max > 0 then
+    v_sales := least(100, greatest(0, round(v_profit / v_team_max * 100)));
+  else
+    v_sales := case when v_profit > 0 then 70 else 50 end;
+  end if;
+  v_exec   := case when v_tasks = 0 then 70 else round(v_done * 100.0 / v_tasks) end;
+  v_collab := case when v_done  = 0 then 70 else round(v_ontime * 100.0 / v_done) end;
+  if v_prev_profit > 0 then
+    v_growth := least(100, greatest(0, round(60 + (v_profit - v_prev_profit) / v_prev_profit * 40)));
+  elsif v_profit > 0 then
+    v_growth := 80;
+  else
+    v_growth := 50;
+  end if;
+
+  v_score := round(v_sales * 0.45 + v_exec * 0.30 + v_collab * 0.15 + v_growth * 0.10, 1);
+  v_grade := case when v_score >= 90 then 'S'
+                  when v_score >= 80 then 'A'
+                  when v_score >= 70 then 'B'
+                  when v_score >= 60 then 'C'
+                  else 'D' end;
+
+  return jsonb_build_object(
+    'period', p_period, 'start', v_start, 'end', v_end,
+    'orders', v_orders, 'units', v_units,
+    'gmv', round(v_gmv, 2), 'profit', round(v_profit, 2), 'prev_profit', round(v_prev_profit, 2),
+    'task_total', v_tasks, 'task_done', v_done, 'task_ontime', v_ontime,
+    'po_count', v_pos, 'po_amount', round(v_po_amt, 2),
+    'kpi', jsonb_build_object('sales', v_sales, 'execution', v_exec,
+                              'collaboration', v_collab, 'growth', v_growth),
+    'score', v_score, 'grade', v_grade);
+end;
+$$;
+
+-- ---------- 按真实数据一键算绩效分 ----------
+create or replace function public.apply_performance_score(
+  p_profile_id uuid,
+  p_period     text
+) returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  m       jsonb;
+  v_dept  uuid;
+begin
+  if not public.has_permission('performance.edit') then
+    raise exception '没有绩效评定权限';
+  end if;
+
+  m := public.member_metrics(p_profile_id, p_period);
+
+  select department_id into v_dept from public.profiles where id = p_profile_id;
+
+  insert into public.performance_reviews
+    (profile_id, period, department_id, reviewer_id, score, grade, kpi, metrics,
+     auto_score, auto_grade, summary)
+  values
+    (p_profile_id, p_period, v_dept, auth.uid(),
+     (m->>'score')::numeric, m->>'grade', m->'kpi', m,
+     (m->>'score')::numeric, m->>'grade', '系统按订单 / 任务 / 采购数据自动生成')
+  on conflict (profile_id, period) do update
+    set score      = excluded.score,
+        grade      = excluded.grade,
+        kpi        = excluded.kpi,
+        metrics    = excluded.metrics,
+        auto_score = excluded.auto_score,
+        auto_grade = excluded.auto_grade,
+        reviewer_id = auth.uid(),
+        updated_at = now();
+
+  return m;
+end;
+$$;
+
+-- 存量订单补责任人：老数据没有 owner_id，按创建账号回填，否则绩效全是 0
+update public.orders o
+   set owner_id = o.user_id
+ where o.owner_id is null
+   and exists (select 1 from public.profiles p where p.id = o.user_id);
+
+update public.purchase_orders p
+   set buyer_id = p.user_id
+ where p.buyer_id is null
+   and exists (select 1 from public.profiles f where f.id = p.user_id);
+
 -- 授权（Supabase 新表默认可能不带权限，这里显式声明）
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on
   public.profiles, public.stores, public.products, public.orders,
   public.inventory, public.campaigns, public.creators, public.tasks, public.expenses,
   public.competitors, public.competitor_snapshots,
-  public.suppliers, public.purchase_orders, public.purchase_items,
+  public.suppliers, public.supplier_products, public.purchase_orders, public.purchase_items,
   public.departments, public.positions, public.roles,
-  public.access_requests, public.employee_events, public.performance_reviews
+  public.access_requests, public.employee_events, public.performance_reviews,
+  public.stock_movements, public.purchase_payments
   to authenticated;
 
 -- 流程类函数：离职交接 / 权限审批必须可被登录用户调用（函数内部自行校验 is_staff）
@@ -1311,6 +2150,20 @@ grant execute on function public.decide_access_request(uuid, boolean, text) to a
 grant execute on function public.has_permission(text) to authenticated;
 grant execute on function public.dept_scope(uuid) to authenticated;
 grant execute on function public.team_directory() to authenticated;
+
+-- 业务链路函数：函数内部各自校验权限，不能靠 grant 兜底
+grant execute on function public.sku_avg_cost(text)                          to authenticated;
+grant execute on function public.bump_inventory(uuid, uuid, text, text, integer, text) to authenticated;
+grant execute on function public.fulfill_order(uuid, text, boolean)          to authenticated;
+grant execute on function public.restore_order_stock(uuid)                   to authenticated;
+grant execute on function public.po_total(uuid)                              to authenticated;
+grant execute on function public.register_payment(uuid, numeric, date, text, text, text) to authenticated;
+grant execute on function public.receive_purchase(uuid, jsonb, text, text)   to authenticated;
+grant execute on function public.shortage_plan(uuid)                         to authenticated;
+grant execute on function public.create_po_from_shortage(jsonb, uuid, uuid, uuid) to authenticated;
+grant execute on function public.order_trace(uuid)                           to authenticated;
+grant execute on function public.member_metrics(uuid, text)                  to authenticated;
+grant execute on function public.apply_performance_score(uuid, text)         to authenticated;
 
 -- -------------------------------------------------------------
 -- 默认组织数据（按部门编码判重，只补缺的，不会覆盖你已有的配置）

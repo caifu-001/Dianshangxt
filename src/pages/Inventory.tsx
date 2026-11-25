@@ -1,7 +1,22 @@
 import { useMemo, useState } from 'react'
-import { AlertTriangle, Boxes, ClipboardList, PackageCheck, Pencil, Plus, Trash2, Truck } from 'lucide-react'
+import {
+  AlertTriangle,
+  ArrowDownLeft,
+  ArrowUpRight,
+  Boxes,
+  ClipboardList,
+  PackageCheck,
+  Pencil,
+  Plus,
+  ShoppingCart,
+  Trash2,
+  Truck,
+} from 'lucide-react'
+import dayjs from 'dayjs'
 import { deleteRow, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
-import type { InventoryItem, Product, Store } from '../lib/types'
+import { useAuth } from '../context/AuthContext'
+import { MOVE_META, createPoFromShortage, fetchShortagePlan } from '../lib/flow'
+import type { InventoryItem, Product, ShortageRow, StockMovement, Store, Supplier } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
   Badge,
@@ -15,6 +30,7 @@ import {
   PageHeader,
   Pagination,
   SearchInput,
+  Segmented,
   Select,
   useToast,
 } from '../components/ui'
@@ -87,13 +103,31 @@ export default function Inventory() {
   const [confirmLoading, setConfirmLoading] = useState(false)
   const [creatingTasks, setCreatingTasks] = useState(false)
 
+  // 视图：库存盘点 / 出入库流水 / 补货建议
+  const [view, setView] = useState<'stock' | 'moves' | 'replenish'>('stock')
+  const [moveSearch, setMoveSearch] = useState('')
+  const [moveType, setMoveType] = useState('')
+  const [picked, setPicked] = useState<string[]>([])
+  const [poSupplier, setPoSupplier] = useState('')
+  const [poCreating, setPoCreating] = useState(false)
+
+  const { can } = useAuth()
+  const canBuy = can('purchase.edit')
+
   const { data, loading, error, reload } = useAsync(async () => {
-    const [inventory, stores, products] = await Promise.all([
+    const [inventory, stores, products, movements, shortage, suppliers] = await Promise.all([
       fetchRows<InventoryItem>('inventory', { order: { column: 'updated_at', ascending: false } }),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
       fetchRows<Product>('products'),
+      // 流水是库存变动的底账：谁在什么时候、因为哪张单子、动了多少件
+      fetchRows<StockMovement>('stock_movements', {
+        order: { column: 'created_at', ascending: false },
+        limit: 500,
+      }).catch(() => [] as StockMovement[]),
+      fetchShortagePlan(null).catch(() => [] as ShortageRow[]),
+      fetchRows<Supplier>('suppliers', { filters: [['status', 'eq', 'active']] }).catch(() => [] as Supplier[]),
     ])
-    return { inventory, stores, products }
+    return { inventory, stores, products, movements, shortage, suppliers }
   }, [])
 
   const storeMap = useMemo(() => new Map((data?.stores ?? []).map((s) => [s.id, s])), [data])
@@ -185,11 +219,44 @@ export default function Inventory() {
         avg_daily_sales: Number(form.avg_daily_sales) || 0,
         updated_at: new Date().toISOString(),
       }
+      const nextQty = Math.round(Number(form.available_qty) || 0)
+      const cost = productMap.get(form.product_id)?.cost_price ?? 0
+
       if (editing) {
+        const delta = nextQty - Number(editing.available_qty)
         await updateRow('inventory', editing.id, payload)
-        push('库存已更新')
+        // 手工改数量必须留痕，否则流水和库存对不上就再也查不清了
+        if (delta !== 0) {
+          await insertRow('stock_movements', {
+            store_id: payload.store_id,
+            product_id: payload.product_id,
+            sku: payload.sku,
+            title: payload.title,
+            warehouse: payload.warehouse,
+            move_type: 'adjust',
+            qty: delta,
+            unit_cost: cost,
+            ref_type: 'manual',
+            note: '手工盘点调整',
+          }).catch(() => undefined)
+        }
+        push(delta === 0 ? '库存已更新' : `库存已更新，差额 ${delta > 0 ? '+' : ''}${delta} 件已记入流水`)
       } else {
         await insertRow('inventory', payload)
+        if (nextQty !== 0) {
+          await insertRow('stock_movements', {
+            store_id: payload.store_id,
+            product_id: payload.product_id,
+            sku: payload.sku,
+            title: payload.title,
+            warehouse: payload.warehouse,
+            move_type: 'in',
+            qty: nextQty,
+            unit_cost: cost,
+            ref_type: 'manual',
+            note: '期初库存录入',
+          }).catch(() => undefined)
+        }
         push('库存记录已创建')
       }
       setModalOpen(false)
@@ -245,11 +312,64 @@ export default function Inventory() {
     }
   }
 
+  /* ---------------- 流水与补货 ---------------- */
+
+  const moveRows = useMemo(() => {
+    const kw = moveSearch.trim().toLowerCase()
+    return (data?.movements ?? []).filter((m) => {
+      if (moveType && m.move_type !== moveType) return false
+      if (!kw) return true
+      return [m.sku, m.title ?? '', m.ref_no ?? '', m.warehouse].some((v) => v.toLowerCase().includes(kw))
+    })
+  }, [data, moveSearch, moveType])
+
+  const shortageRows = useMemo(() => {
+    const list = data?.shortage ?? []
+    return storeFilter ? list.filter((r) => r.store_id === storeFilter) : list
+  }, [data, storeFilter])
+
+  const pickedLines = useMemo(
+    () => shortageRows.filter((r) => picked.includes(r.sku)),
+    [shortageRows, picked],
+  )
+
+  async function createPoFromPicked() {
+    if (!pickedLines.length) {
+      push('请先勾选要采购的 SKU', 'error')
+      return
+    }
+    setPoCreating(true)
+    try {
+      const res = await createPoFromShortage(
+        pickedLines.map((r) => {
+          const product = r.product_id ? productMap.get(r.product_id) : undefined
+          return {
+            sku: r.sku,
+            title: r.title,
+            product_id: r.product_id,
+            qty: r.suggest_qty,
+            unit_cost: product?.cost_price ?? 0,
+          }
+        }),
+        poSupplier || null,
+        storeFilter || null,
+        null,
+      )
+      push(`已生成采购单 ${res.po_no}（${res.lines} 个 SKU），到「采购管理」付款并入库`)
+      setPicked([])
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '生成采购单失败', 'error')
+    } finally {
+      setPoCreating(false)
+    }
+  }
+
   return (
     <>
       <PageHeader
         title="库存管理"
-        description="可售天数自动测算，库龄与在途一目了然"
+        description="可售天数自动测算；每笔出入库都留流水，缺货可直接转成采购单"
         actions={
           <>
             <Button icon={<ClipboardList className="w-3.5 h-3.5" />} onClick={createReplenishTasks} loading={creatingTasks} disabled={!enriched.length}>
@@ -262,6 +382,21 @@ export default function Inventory() {
         }
       />
 
+      <div className="mb-3">
+        <Segmented
+          value={view}
+          onChange={(v) => setView(v as typeof view)}
+          size="sm"
+          options={[
+            { value: 'stock', label: '库存盘点' },
+            { value: 'moves', label: `出入库流水 ${data?.movements?.length ?? 0}` },
+            { value: 'replenish', label: `补货建议 ${shortageRows.length}` },
+          ]}
+        />
+      </div>
+
+      {view === 'stock' && (
+        <>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
         {[
           { label: '可用库存总量', value: num(kpi.totalQty), icon: <Boxes className="w-4 h-4" />, tone: 'bg-brand-50 text-brand-600' },
@@ -388,6 +523,213 @@ export default function Inventory() {
 
         {filtered.length > PAGE_SIZE && <Pagination page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />}
       </div>
+        </>
+      )}
+
+      {view === 'moves' && (
+        <div className="card overflow-hidden">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-ink-100">
+            <SearchInput
+              value={moveSearch}
+              onChange={setMoveSearch}
+              placeholder="SKU / 单号 / 仓库"
+              className="w-full sm:w-60"
+            />
+            <Select
+              className="w-full sm:w-32"
+              value={moveType}
+              onChange={setMoveType}
+              placeholder="全部类型"
+              options={Object.entries(MOVE_META).map(([value, v]) => ({ value, label: v.label }))}
+            />
+            <span className="ml-auto text-[11.5px] text-ink-400">
+              最近 <span className="num text-ink-700 font-medium">{num(moveRows.length)}</span> 条变动
+            </span>
+          </div>
+
+          {loading ? (
+            <LoadingBlock rows={8} />
+          ) : !moveRows.length ? (
+            <EmptyState
+              icon={<Boxes className="w-5 h-5" />}
+              title="还没有出入库记录"
+              description="订单出库、采购入库、手工盘点都会自动写一条流水，这里能看到每件货的来龙去脉。"
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[880px]">
+                <thead>
+                  <tr>
+                    <th className="th w-28">时间</th>
+                    <th className="th w-20">类型</th>
+                    <th className="th">SKU / 商品</th>
+                    <th className="th">仓库</th>
+                    <th className="th text-right">数量</th>
+                    <th className="th text-right">单价成本</th>
+                    <th className="th">来源单据</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {moveRows.slice(0, 300).map((m) => {
+                    const meta = MOVE_META[m.move_type] ?? MOVE_META.adjust
+                    const store = m.store_id ? storeMap.get(m.store_id) : null
+                    const inbound = Number(m.qty) > 0
+                    return (
+                      <tr key={m.id} className="hover:bg-ink-50/60">
+                        <td className="td">
+                          <p className="num text-[11.5px] text-ink-600">{dayjs(m.created_at).format('MM-DD HH:mm')}</p>
+                        </td>
+                        <td className="td">
+                          <span className={cn('text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap', meta.cls)}>
+                            {meta.label}
+                          </span>
+                        </td>
+                        <td className="td">
+                          <p className="text-[12px] font-mono text-ink-800 truncate max-w-[200px]">{m.sku}</p>
+                          <p className="text-[10.5px] text-ink-400 truncate max-w-[220px]">{m.title ?? '—'}</p>
+                        </td>
+                        <td className="td">
+                          <p className="text-[11.5px] text-ink-600">{m.warehouse}</p>
+                          <p className="text-[10.5px] text-ink-400 truncate max-w-[110px]">{store?.name ?? '国内仓'}</p>
+                        </td>
+                        <td className="td text-right">
+                          <span
+                            className={cn(
+                              'num text-[12.5px] font-semibold inline-flex items-center gap-0.5',
+                              inbound ? 'text-emerald-600' : 'text-rose-600',
+                            )}
+                          >
+                            {inbound ? <ArrowDownLeft className="w-3 h-3" /> : <ArrowUpRight className="w-3 h-3" />}
+                            {inbound ? '+' : ''}
+                            {num(m.qty)}
+                          </span>
+                        </td>
+                        <td className="td text-right num text-[11.5px] text-ink-500">
+                          {Number(m.unit_cost) > 0 ? Number(m.unit_cost).toFixed(2) : '—'}
+                        </td>
+                        <td className="td">
+                          <p className="text-[11.5px] text-ink-600 font-mono truncate max-w-[160px]">{m.ref_no ?? '—'}</p>
+                          <p className="text-[10.5px] text-ink-400">{m.note ?? ''}</p>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {view === 'replenish' && (
+        <div className="card overflow-hidden">
+          <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-ink-100">
+            <div className="flex-1 min-w-[200px]">
+              <p className="text-[12px] font-medium text-ink-800">按近 30 天销量与供应商交期测算的补货清单</p>
+              <p className="text-[11px] text-ink-400 mt-0.5">
+                建议量 = 日均销量 × 交期 + 安全库存 − 可用 − 在途；勾选后一键生成草稿采购单
+              </p>
+            </div>
+            <Select
+              className="w-full sm:w-40"
+              value={poSupplier}
+              onChange={setPoSupplier}
+              placeholder="选择供应商"
+              options={(data?.suppliers ?? []).map((x) => ({ value: x.id, label: x.name }))}
+            />
+            {canBuy && (
+              <Button
+                variant="primary"
+                icon={<ShoppingCart className="w-3.5 h-3.5" />}
+                onClick={createPoFromPicked}
+                loading={poCreating}
+                disabled={!pickedLines.length}
+              >
+                生成采购单 {pickedLines.length ? `(${pickedLines.length})` : ''}
+              </Button>
+            )}
+          </div>
+
+          {loading ? (
+            <LoadingBlock rows={8} />
+          ) : !shortageRows.length ? (
+            <EmptyState
+              icon={<PackageCheck className="w-5 h-5" />}
+              title="暂时不需要补货"
+              description="当前所有 SKU 的可用库存 + 在途都能覆盖交期内的销量。"
+            />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[900px]">
+                <thead>
+                  <tr>
+                    <th className="th w-10">
+                      <input
+                        type="checkbox"
+                        className="w-3.5 h-3.5 accent-brand-600"
+                        checked={picked.length === shortageRows.length && shortageRows.length > 0}
+                        onChange={(e) => setPicked(e.target.checked ? shortageRows.map((r) => r.sku) : [])}
+                      />
+                    </th>
+                    <th className="th">SKU / 商品</th>
+                    <th className="th">店铺</th>
+                    <th className="th text-right">可用</th>
+                    <th className="th text-right">在途</th>
+                    <th className="th text-right">日均</th>
+                    <th className="th text-right">可售天数</th>
+                    <th className="th text-right">建议补货</th>
+                    <th className="th text-right">交期</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shortageRows.map((r) => {
+                    const store = r.store_id ? storeMap.get(r.store_id) : null
+                    const on = picked.includes(r.sku)
+                    const danger = r.days_cover !== null && r.days_cover < 15
+                    return (
+                      <tr
+                        key={`${r.sku}-${r.store_id ?? 'na'}`}
+                        className={cn('cursor-pointer', on ? 'bg-brand-50/50' : 'hover:bg-ink-50/60')}
+                        onClick={() =>
+                          setPicked((prev) => (prev.includes(r.sku) ? prev.filter((x) => x !== r.sku) : [...prev, r.sku]))
+                        }
+                      >
+                        <td className="td" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="w-3.5 h-3.5 accent-brand-600"
+                            checked={on}
+                            onChange={(e) =>
+                              setPicked((prev) => (e.target.checked ? [...prev, r.sku] : prev.filter((x) => x !== r.sku)))
+                            }
+                          />
+                        </td>
+                        <td className="td">
+                          <p className="text-[12px] font-mono text-ink-800 truncate max-w-[180px]">{r.sku}</p>
+                          <p className="text-[10.5px] text-ink-400 truncate max-w-[220px]">{r.title ?? '—'}</p>
+                        </td>
+                        <td className="td text-[11.5px] text-ink-600">{store?.name ?? '—'}</td>
+                        <td className="td text-right num text-[12px] text-ink-700">{num(r.available)}</td>
+                        <td className="td text-right num text-[12px] text-ink-500">{num(r.inbound)}</td>
+                        <td className="td text-right num text-[12px] text-ink-500">{Number(r.avg_daily).toFixed(1)}</td>
+                        <td className="td text-right">
+                          <span className={cn('num text-[12px]', danger ? 'text-rose-600 font-medium' : 'text-ink-500')}>
+                            {r.days_cover === null ? '—' : `${r.days_cover} 天`}
+                          </span>
+                        </td>
+                        <td className="td text-right num text-[12.5px] font-semibold text-brand-700">
+                          {num(r.suggest_qty)}
+                        </td>
+                        <td className="td text-right num text-[11.5px] text-ink-500">{r.lead_time} 天</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       <Modal
         open={modalOpen}

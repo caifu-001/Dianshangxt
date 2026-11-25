@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { CalendarClock, Check, CheckSquare, GripVertical, Pencil, Plus, RotateCcw, Trash2, User } from 'lucide-react'
 import dayjs from 'dayjs'
-import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
+import { callRpc, deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
 import { PRIORITY, TASK_MODULE, TASK_STATUS } from '../lib/constants'
 import type { Store, Task } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
+import { useAuth } from '../context/AuthContext'
 import {
   Badge,
   Button,
@@ -27,6 +28,15 @@ const COLUMNS: Array<{ key: Task['status']; label: string; accent: string }> = [
   { key: 'done', label: '已完成', accent: 'bg-emerald-500' },
 ]
 
+/** 通讯录（team_directory）：任务责任人挂到真实账号，绩效才能算执行分 */
+interface DirectoryRow {
+  id: string
+  full_name: string | null
+  email: string | null
+  status: string
+  employment_status: string
+}
+
 interface FormState {
   title: string
   description: string
@@ -36,6 +46,7 @@ interface FormState {
   due_date: string
   assignee: string
   store_id: string
+  owner_id: string
 }
 
 const EMPTY: FormState = {
@@ -47,10 +58,12 @@ const EMPTY: FormState = {
   due_date: today(),
   assignee: '',
   store_id: '',
+  owner_id: '',
 }
 
 export default function Tasks() {
   const { push } = useToast()
+  const { user } = useAuth()
   const [search, setSearch] = useState('')
   const [storeFilter, setStoreFilter] = useState('')
   const [modalOpen, setModalOpen] = useState(false)
@@ -64,14 +77,22 @@ export default function Tasks() {
   const [moving, setMoving] = useState<string | null>(null)
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [tasks, stores] = await Promise.all([
+    const [tasks, stores, directory] = await Promise.all([
       fetchRows<Task>('tasks', { order: { column: 'created_at', ascending: false } }),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
+      callRpc<DirectoryRow[]>('team_directory').catch(() => [] as DirectoryRow[]),
     ])
-    return { tasks, stores }
+    return { tasks, stores, directory }
   }, [])
 
   const storeMap = useMemo(() => new Map((data?.stores ?? []).map((s) => [s.id, s])), [data])
+  const memberOptions = useMemo(
+    () =>
+      (data?.directory ?? [])
+        .filter((m) => m.status === 'active' && (m.employment_status ?? 'active') === 'active')
+        .map((m) => ({ value: m.id, label: m.full_name || m.email || '未命名' })),
+    [data],
+  )
 
   const filtered = useMemo(() => {
     const kw = search.trim().toLowerCase()
@@ -115,6 +136,7 @@ export default function Tasks() {
       due_date: task.due_date ?? '',
       assignee: task.assignee ?? '',
       store_id: task.store_id ?? '',
+      owner_id: task.owner_id ?? '',
     })
     setModalOpen(true)
   }
@@ -132,6 +154,7 @@ export default function Tasks() {
         due_date: form.due_date || null,
         assignee: form.assignee.trim() || null,
         store_id: form.store_id || null,
+        owner_id: form.owner_id || user?.id || null,
         completed_at: form.status === 'done' ? new Date().toISOString() : null,
       }
       if (editing) {
@@ -442,8 +465,16 @@ export default function Tasks() {
             <Field label="截止日期">
               <input type="date" className="input" value={form.due_date} onChange={(e) => setForm({ ...form, due_date: e.target.value })} />
             </Field>
-            <Field label="负责人">
+            <Field label="负责人（文字备注）">
               <input className="input" value={form.assignee} onChange={(e) => setForm({ ...form, assignee: e.target.value })} placeholder="如：视觉组 / 小王" />
+            </Field>
+            <Field label="责任人账号" hint="挂到账号后，完成情况会计入他的绩效执行分">
+              <Select
+                value={form.owner_id}
+                onChange={(v) => setForm({ ...form, owner_id: v })}
+                options={memberOptions}
+                placeholder="默认当前登录人"
+              />
             </Field>
             <Field label="关联店铺">
               <Select

@@ -67,6 +67,7 @@ const RESOURCE_TABLES: Array<{ table: string; label: string }> = [
   { table: 'competitors', label: '竞品' },
   { table: 'competitor_snapshots', label: '竞品快照' },
   { table: 'suppliers', label: '供应商' },
+  { table: 'supplier_products', label: '供应商产品' },
   { table: 'purchase_orders', label: '采购单' },
   { table: 'purchase_items', label: '采购明细' },
 ]

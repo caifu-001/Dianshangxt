@@ -119,6 +119,10 @@ export interface PerformanceReview {
   score: number
   grade: PerformanceGrade
   kpi: Record<string, number>
+  /** 自动算分时的原始指标快照 */
+  metrics: Record<string, unknown>
+  auto_score: number | null
+  auto_grade: PerformanceGrade | null
   summary: string | null
   improvement: string | null
   status: 'draft' | 'published'
@@ -181,6 +185,14 @@ export interface Order {
   other_fee: number
   status: 'pending' | 'shipped' | 'delivered' | 'refunded' | 'cancelled'
   note: string | null
+  /** 责任人：订单业绩与利润归集到他 / 她 */
+  owner_id: string | null
+  /** 出库状态：pending 未出库 / out 已出库 / returned 已退回 */
+  stock_state: 'pending' | 'out' | 'returned'
+  fulfilled_at: string | null
+  fulfillment_wh: string | null
+  /** 成本来源：manual 手工填 / stock 由采购加权成本回填 */
+  cost_source: 'manual' | 'stock'
   gross_amount: number
   profit: number
   created_at: string
@@ -253,6 +265,12 @@ export interface Task {
   status: 'todo' | 'doing' | 'done'
   due_date: string | null
   assignee: string | null
+  /** 责任人（真实账号），用于绩效统计 */
+  owner_id: string | null
+  /** 关联单据：order / purchase / product / competitor */
+  ref_type: string | null
+  ref_id: string | null
+  ref_no: string | null
   created_at: string
   completed_at: string | null
 }
@@ -322,21 +340,60 @@ export interface CompetitorSnapshot {
 export interface Supplier {
   id: string
   user_id: string
+  /** 供应商编码（唯一，可留空） */
+  code: string | null
   name: string
   contact: string | null
+  contact_title: string | null
   phone: string | null
+  fax: string | null
   email: string | null
+  website: string | null
+  country: string | null
+  city: string | null
   address: string | null
   category: string | null
+  /** 标签（如 快速打样 / 小批量 / 外贸原单） */
+  tags: string[]
   payment_terms: string
   lead_time_days: number
   rating: number
+  /** 资质证照（营业执照 / ISO / 检测报告编号等） */
+  qualification: string | null
+  tax_no: string | null
+  bank_name: string | null
+  bank_account: string | null
+  /** 业务负责人（采购业绩归集） */
+  owner_id: string | null
+  cooperation_since: string | null
   status: 'active' | 'paused'
   note: string | null
   created_at: string
+  updated_at: string
+}
+
+/** 供应商可供产品 / 报价 */
+export interface SupplierProduct {
+  id: string
+  user_id: string
+  supplier_id: string
+  product_id: string | null
+  sku: string
+  title: string | null
+  unit: string
+  currency: string
+  unit_cost: number
+  moq: number
+  lead_time_days: number
+  status: 'active' | 'paused'
+  note: string | null
+  created_at: string
+  updated_at: string
 }
 
 export type PurchaseStatus = 'draft' | 'ordered' | 'partial' | 'received' | 'cancelled'
+
+export type PaymentStatus = 'unpaid' | 'partial' | 'paid'
 
 export interface PurchaseOrder {
   id: string
@@ -352,8 +409,75 @@ export interface PurchaseOrder {
   shipping_fee: number
   other_fee: number
   note: string | null
+  /** 采购员：采购业绩归集 */
+  buyer_id: string | null
+  payment_status: PaymentStatus
+  paid_amount: number
+  /** 来源：手工新建 / 缺货补货 / 订单驱动 */
+  source: 'manual' | 'shortage' | 'order'
+  source_order_id: string | null
+  received_at: string | null
   created_at: string
   updated_at: string
+}
+
+export interface PurchasePayment {
+  id: string
+  user_id: string
+  po_id: string
+  amount: number
+  currency: string
+  paid_at: string
+  method: string
+  voucher_no: string | null
+  payer_id: string | null
+  note: string | null
+  created_at: string
+}
+
+/** 库存流水：入库 + / 出库 −，是库存变动的唯一底账 */
+export interface StockMovement {
+  id: string
+  user_id: string
+  store_id: string | null
+  product_id: string | null
+  sku: string
+  title: string | null
+  warehouse: string
+  move_type: 'in' | 'out' | 'adjust' | 'return'
+  qty: number
+  unit_cost: number
+  ref_type: 'order' | 'purchase' | 'manual' | null
+  ref_id: string | null
+  ref_no: string | null
+  owner_id: string | null
+  note: string | null
+  created_at: string
+}
+
+/** 缺货补货建议（shortage_plan 返回） */
+export interface ShortageRow {
+  sku: string
+  title: string | null
+  product_id: string | null
+  store_id: string | null
+  available: number
+  inbound: number
+  safety: number
+  avg_daily: number
+  days_cover: number | null
+  suggest_qty: number
+  lead_time: number
+}
+
+/** 单据链路时间线（order_trace 返回） */
+export interface TraceEvent {
+  ts: string
+  kind: 'order' | 'out' | 'purchase' | 'payment' | 'in' | 'task'
+  title: string
+  detail: string | null
+  ref_no: string | null
+  owner_id: string | null
 }
 
 export interface PurchaseItem {

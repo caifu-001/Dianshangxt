@@ -28,9 +28,12 @@ import type { Profile } from '../lib/types'
 
 // 清空顺序按外键依赖排：子表在前、主表在后（级联删除也会兜底）
 const CLEAR_ORDER = [
+  'purchase_payments',
+  'stock_movements',
   'orders',
   'inventory',
   'purchase_items',
+  'supplier_products',
   'purchase_orders',
   'suppliers',
   'campaigns',
@@ -48,6 +51,9 @@ const COUNTS: Array<{ table: string; label: string }> = [
   { table: 'orders', label: '订单' },
   { table: 'inventory', label: '库存' },
   { table: 'purchase_orders', label: '采购单' },
+  { table: 'supplier_products', label: '供应商产品' },
+  { table: 'stock_movements', label: '库存流水' },
+  { table: 'purchase_payments', label: '采购付款' },
   { table: 'suppliers', label: '供应商' },
   { table: 'campaigns', label: '广告' },
   { table: 'creators', label: '达人' },

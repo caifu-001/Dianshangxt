@@ -1,6 +1,8 @@
 import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import {
   ArrowDownRight,
+  ArrowRight,
   ArrowUpRight,
   Building2,
   CalendarClock,
@@ -16,7 +18,9 @@ import {
   Truck,
 } from 'lucide-react'
 import dayjs from 'dayjs'
-import { deleteRow, deleteWhere, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
+import { callRpc, deleteRow, deleteWhere, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
+import { useAuth } from '../context/AuthContext'
+import { PAYMENT_META, PAY_METHODS, receivePurchase, registerPayment } from '../lib/flow'
 import { PAYMENT_TERMS, PO_STATUS, PURCHASE_WAREHOUSES, SUPPLIER_STATUS } from '../lib/constants'
 import type { Product, PurchaseItem, PurchaseOrder, PurchaseStatus, Store, Supplier } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
@@ -67,6 +71,7 @@ interface PoDraft {
   shipping_fee: string
   other_fee: string
   note: string
+  buyer_id: string
 }
 
 const EMPTY_PO: PoDraft = {
@@ -81,6 +86,7 @@ const EMPTY_PO: PoDraft = {
   shipping_fee: '0',
   other_fee: '0',
   note: '',
+  buyer_id: '',
 }
 
 interface ItemDraft {
@@ -134,8 +140,19 @@ const EMPTY_SUPPLIER: SupplierDraft = {
 
 const CURRENCY_OPTIONS = ['CNY', 'USD', 'GBP', 'EUR', 'JPY']
 
+/** 通讯录（team_directory）：采购员与付款人下拉用 */
+interface DirectoryRow {
+  id: string
+  full_name: string | null
+  email: string | null
+  status: string
+  employment_status: string
+}
+
 export default function Procurement() {
   const { push } = useToast()
+  const { user, can } = useAuth()
+  const canBuy = can('purchase.edit')
   const fx = useFx()
 
   const [tab, setTab] = useState<Tab>('orders')
@@ -155,8 +172,16 @@ export default function Procurement() {
   const [receiptId, setReceiptId] = useState<string | null>(null)
   const [receiptRows, setReceiptRows] = useState<Record<string, string>>({})
   const [receiptWarehouse, setReceiptWarehouse] = useState('国内仓')
-  const [syncStock, setSyncStock] = useState(true)
   const [receiving, setReceiving] = useState(false)
+
+  // 付款登记
+  const [payPo, setPayPo] = useState<PurchaseOrder | null>(null)
+  const [payAmount, setPayAmount] = useState('')
+  const [payDate, setPayDate] = useState(today())
+  const [payMethod, setPayMethod] = useState('bank')
+  const [payVoucher, setPayVoucher] = useState('')
+  const [payNote, setPayNote] = useState('')
+  const [paying, setPaying] = useState(false)
 
   const [supOpen, setSupOpen] = useState(false)
   const [editingSup, setEditingSup] = useState<Supplier | null>(null)
@@ -168,14 +193,15 @@ export default function Procurement() {
   const [confirmLoading, setConfirmLoading] = useState(false)
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [orders, items, suppliers, products, stores] = await Promise.all([
+    const [orders, items, suppliers, products, stores, directory] = await Promise.all([
       fetchRows<PurchaseOrder>('purchase_orders', { order: { column: 'order_date', ascending: false } }),
       fetchRows<PurchaseItem>('purchase_items', { order: { column: 'created_at' } }),
       fetchRows<Supplier>('suppliers', { order: { column: 'created_at' } }),
       fetchRows<Product>('products'),
       fetchRows<Store>('stores', { order: { column: 'created_at' } }),
+      callRpc<DirectoryRow[]>('team_directory').catch(() => []),
     ])
-    return { orders, items, suppliers, products, stores }
+    return { orders, items, suppliers, products, stores, directory }
   }, [])
 
   const itemsByPo = useMemo(() => {
@@ -190,6 +216,14 @@ export default function Procurement() {
   const poMap = useMemo(() => new Map((data?.orders ?? []).map((o) => [o.id, o])), [data])
   const supplierMap = useMemo(() => new Map((data?.suppliers ?? []).map((s) => [s.id, s])), [data])
   const productMap = useMemo(() => new Map((data?.products ?? []).map((p) => [p.id, p])), [data])
+  const memberMap = useMemo(() => new Map((data?.directory ?? []).map((m) => [m.id, m])), [data])
+  const memberOptions = useMemo(
+    () =>
+      (data?.directory ?? [])
+        .filter((m) => m.status === 'active' && (m.employment_status ?? 'active') === 'active')
+        .map((m) => ({ value: m.id, label: m.full_name || m.email || '未命名' })),
+    [data],
+  )
 
   const itemsOf = (poId: string) => itemsByPo.get(poId) ?? []
 
@@ -289,6 +323,7 @@ export default function Procurement() {
       supplier_id: data?.suppliers[0]?.id ?? '',
       store_id: data?.stores[0]?.id ?? '',
       expected_date: dayjs().add(30, 'day').format('YYYY-MM-DD'),
+      buyer_id: user?.id ?? '',
     })
     setItemDrafts([emptyItem()])
     setPoOpen(true)
@@ -308,6 +343,7 @@ export default function Procurement() {
       shipping_fee: String(po.shipping_fee),
       other_fee: String(po.other_fee),
       note: po.note ?? '',
+      buyer_id: po.buyer_id ?? '',
     })
     const list = itemsOf(po.id)
     setItemDrafts(
@@ -372,6 +408,7 @@ export default function Procurement() {
         shipping_fee: Number(poDraft.shipping_fee) || 0,
         other_fee: Number(poDraft.other_fee) || 0,
         note: poDraft.note.trim() || null,
+        buyer_id: poDraft.buyer_id || user?.id || null,
         updated_at: new Date().toISOString(),
       }
 
@@ -423,7 +460,6 @@ export default function Procurement() {
     }
     setReceiptRows(rows)
     setReceiptWarehouse(po.warehouse)
-    setSyncStock(!!po.store_id)
     setReceiptId(po.id)
   }
 
@@ -433,7 +469,8 @@ export default function Procurement() {
       .map((item) => {
         const remain = Math.max(0, Number(item.quantity) - Number(item.received_qty))
         const typed = Math.round(Number(receiptRows[item.id]) || 0)
-        return { item, qty: Math.min(Math.max(0, typed), remain) }
+        const qty = Math.min(Math.max(0, typed), remain)
+        return { item, qty, unit_cost: Number(item.unit_price) }
       })
       .filter((l) => l.qty > 0)
 
@@ -441,75 +478,64 @@ export default function Procurement() {
 
     setReceiving(true)
     try {
-      for (const line of lines) {
-        await updateRow('purchase_items', line.item.id, {
-          received_qty: Number(line.item.received_qty) + line.qty,
-        })
-      }
-
-      const receivedAfter = new Map(lines.map((l) => [l.item.id, Number(l.item.received_qty) + l.qty]))
-      const allReceived = receiptItems.every(
-        (item) => (receivedAfter.get(item.id) ?? Number(item.received_qty)) >= Number(item.quantity),
+      // 走数据库函数：写流水 + 加库存 + 采购价回流成本 + 刷状态，一个事务完成
+      const res = await receivePurchase(
+        receiptPo.id,
+        lines.map((l) => ({ item_id: l.item.id, qty: l.qty, unit_cost: l.unit_cost })),
+        receiptWarehouse,
+        `到货入库 · ${receiptWarehouse}`,
       )
-      await updateRow('purchase_orders', receiptPo.id, {
-        status: allReceived ? 'received' : 'partial',
-        updated_at: new Date().toISOString(),
-      })
-
-      let syncedQty = 0
-      let syncFailed = 0
-      const storeId = receiptPo.store_id
-      if (syncStock && storeId) {
-        for (const line of lines) {
-          try {
-            const existing = await fetchRows<{ id: string; available_qty: number }>('inventory', {
-              filters: [
-                ['store_id', 'eq', storeId],
-                ['sku', 'eq', line.item.sku],
-                ['warehouse', 'eq', receiptWarehouse],
-              ],
-              columns: 'id, available_qty',
-              limit: 1,
-            })
-            if (existing.length) {
-              await updateRow('inventory', existing[0].id, {
-                available_qty: Number(existing[0].available_qty) + line.qty,
-                updated_at: new Date().toISOString(),
-              })
-            } else {
-              await insertRow('inventory', {
-                store_id: storeId,
-                product_id: line.item.product_id || null,
-                sku: line.item.sku,
-                title: line.item.title,
-                warehouse: receiptWarehouse,
-                available_qty: line.qty,
-                inbound_qty: 0,
-                reserved_qty: 0,
-                safety_stock: 0,
-                avg_daily_sales: 0,
-                updated_at: new Date().toISOString(),
-              })
-            }
-            syncedQty += line.qty
-          } catch {
-            // 库存同步失败（例如没有库存编辑权限）不阻断收货本身
-            syncFailed += 1
-          }
-        }
+      if (!res?.ok) {
+        push(res?.message || '没有可入库的数量', 'error')
+        return
       }
-
-      const parts = [`已登记 ${lines.length} 条明细到货`]
-      if (syncedQty) parts.push(`同步入库 ${num(syncedQty)} 件到 ${receiptWarehouse}`)
-      if (syncFailed) parts.push(`${syncFailed} 个 SKU 未同步库存（检查库存权限）`)
-      if (allReceived) parts.push('整单已到齐')
-      push(parts.join('，'), syncFailed ? 'error' : 'success')
+      const parts = [`已入库 ${num(res.received ?? 0)} 件到 ${receiptWarehouse}`]
+      parts.push(res.status === 'received' ? '整单已到齐' : '部分到货，可继续登记')
+      if (receiptPo.store_id) parts.push('店铺库存已同步')
+      parts.push('采购加权成本已回流商品档案')
+      push(parts.join('，'))
       setReceiptId(null)
       reload()
     } catch (err) {
-      push(err instanceof Error ? err.message : '收货失败', 'error')
+      push(err instanceof Error ? err.message : '入库失败', 'error')
     } finally {
       setReceiving(false)
+    }
+  }
+
+  /* ---------------- 付款 ---------------- */
+
+  function openPay(po: PurchaseOrder) {
+    const remain = Math.max(0, totalOf(po) - Number(po.paid_amount || 0))
+    setPayPo(po)
+    setPayAmount(String(Number(remain.toFixed(2))))
+    setPayDate(today())
+    setPayMethod('bank')
+    setPayVoucher('')
+    setPayNote('')
+  }
+
+  async function handlePay() {
+    if (!payPo) return
+    const amount = Number(payAmount)
+    if (!(amount > 0)) return push('请填写付款金额', 'error')
+    setPaying(true)
+    try {
+      const res = await registerPayment(
+        payPo.id,
+        amount,
+        payDate,
+        payMethod,
+        payVoucher.trim() || undefined,
+        payNote.trim() || undefined,
+      )
+      push(`已登记付款 ${money(amount, payPo.currency)}，当前${PAYMENT_META[res.status]?.label ?? res.status}`)
+      setPayPo(null)
+      reload()
+    } catch (err) {
+      push(err instanceof Error ? err.message : '付款登记失败', 'error')
+    } finally {
+      setPaying(false)
     }
   }
 
@@ -795,8 +821,8 @@ export default function Procurement() {
                       <th className="th text-right">金额</th>
                       <th className="th">下单 / 预计到仓</th>
                       <th className="th w-[150px]">收货进度</th>
-                      <th className="th">状态</th>
-                      <th className="th w-28" />
+                      <th className="th">状态 / 付款</th>
+                      <th className="th w-32" />
                     </tr>
                   </thead>
                   <tbody>
@@ -811,7 +837,17 @@ export default function Procurement() {
                         <tr key={po.id} className="hover:bg-ink-50/60 group cursor-pointer" onClick={() => setDetailPoId(po.id)}>
                           <td className="td">
                             <p className="text-[12.5px] font-medium text-ink-800 font-mono">{po.po_no}</p>
-                            <p className="text-[10.5px] text-ink-400">{po.warehouse}</p>
+                            <p className="text-[10.5px] text-ink-400 truncate max-w-[150px]">
+                              {po.warehouse}
+                              {po.buyer_id && memberMap.get(po.buyer_id)?.full_name
+                                ? ` · ${memberMap.get(po.buyer_id)?.full_name}`
+                                : ''}
+                            </p>
+                            {po.source !== 'manual' && (
+                              <p className="text-[9.5px] text-brand-600 mt-0.5">
+                                {po.source === 'order' ? '订单驱动补货' : '缺货补货'}
+                              </p>
+                            )}
                           </td>
                           <td className="td">
                             <p className="text-[12px] text-ink-700 truncate max-w-[160px]">{supplier?.name ?? '—'}</p>
@@ -859,6 +895,21 @@ export default function Procurement() {
                           </td>
                           <td className="td">
                             <Badge tone={meta?.tone ?? 'gray'}>{meta?.label ?? po.status}</Badge>
+                            <div className="mt-1">
+                              <span
+                                className={cn(
+                                  'text-[10px] px-1.5 py-0.5 rounded border whitespace-nowrap',
+                                  (PAYMENT_META[po.payment_status ?? 'unpaid'] ?? PAYMENT_META.unpaid).cls,
+                                )}
+                              >
+                                {(PAYMENT_META[po.payment_status ?? 'unpaid'] ?? PAYMENT_META.unpaid).label}
+                              </span>
+                              {Number(po.paid_amount) > 0 && (
+                                <span className="ml-1 text-[10px] text-ink-400 num">
+                                  {money(po.paid_amount, po.currency)}
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td className="td" onClick={(e) => e.stopPropagation()}>
                             <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -869,6 +920,15 @@ export default function Procurement() {
                                   title="登记到货"
                                 >
                                   <PackageCheck className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                              {canBuy && po.status !== 'cancelled' && (
+                                <button
+                                  className="p-1.5 rounded-md text-ink-400 hover:text-violet-600 hover:bg-violet-50"
+                                  onClick={() => openPay(po)}
+                                  title="登记付款"
+                                >
+                                  <CircleDollarSign className="w-3.5 h-3.5" />
                                 </button>
                               )}
                               <button className="p-1.5 rounded-md text-ink-400 hover:text-ink-800 hover:bg-ink-100" onClick={() => openEditPo(po)} title="编辑">
@@ -901,6 +961,17 @@ export default function Procurement() {
 
       {tab === 'suppliers' && (
         <>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-[11.5px] text-ink-500">
+              这里是采购流程里的简版供应商列表；完整档案（联系方式 / 资质 / 可供产品报价 / 供货绩效）在供应商管理库
+            </p>
+            <Link
+              to="/suppliers"
+              className="inline-flex items-center gap-1 text-[11.5px] font-medium text-brand-600 hover:text-brand-700 shrink-0 ml-3"
+            >
+              进入供应商库 <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
             {[
               { label: '供应商总数', value: num((data?.suppliers ?? []).length), icon: <Factory className="w-4 h-4" />, tone: 'bg-brand-50 text-brand-600' },
@@ -1181,6 +1252,11 @@ export default function Procurement() {
                 编辑
               </Button>
             )}
+            {detailPo && canBuy && detailPo.status !== 'cancelled' && (
+              <Button icon={<CircleDollarSign className="w-3.5 h-3.5" />} onClick={() => { const po = detailPo; setDetailPoId(null); openPay(po) }}>
+                登记付款
+              </Button>
+            )}
             {detailPo && (detailPo.status === 'ordered' || detailPo.status === 'partial') && (
               <Button variant="primary" icon={<PackageCheck className="w-3.5 h-3.5" />} onClick={() => { const po = detailPo; setDetailPoId(null); openReceipt(po) }}>
                 登记到货
@@ -1191,12 +1267,17 @@ export default function Procurement() {
       >
         {detailPo && (
           <div className="space-y-4">
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               {[
                 { label: '状态', value: PO_STATUS[detailPo.status]?.label ?? detailPo.status },
-                { label: '仓库', value: detailPo.warehouse },
-                { label: '预计到仓', value: detailPo.expected_date ? `${fmtDate(detailPo.expected_date)}（${relativeDay(detailPo.expected_date)}）` : '未定' },
+                { label: '付款', value: `${(PAYMENT_META[detailPo.payment_status ?? 'unpaid'] ?? PAYMENT_META.unpaid).label} ${money(detailPo.paid_amount, detailPo.currency)}` },
+                {
+                  label: '采购员',
+                  value: (detailPo.buyer_id && memberMap.get(detailPo.buyer_id)?.full_name) || '未指派',
+                },
                 { label: '金额合计', value: money(totalOf(detailPo), detailPo.currency) },
+                { label: '预计到仓', value: detailPo.expected_date ? `${fmtDate(detailPo.expected_date)}（${relativeDay(detailPo.expected_date)}）` : '未定' },
+                { label: '收货仓库', value: detailPo.warehouse },
               ].map((s) => (
                 <div key={s.label} className="rounded-lg border border-ink-200/70 px-3 py-2">
                   <p className="text-[10.5px] text-ink-400">{s.label}</p>
@@ -1332,6 +1413,14 @@ export default function Procurement() {
               options={Object.entries(PO_STATUS).map(([value, v]) => ({ value, label: v.label }))}
             />
           </Field>
+          <Field label="采购员" hint="采购单量与到货率算到此人绩效">
+            <Select
+              value={poDraft.buyer_id}
+              onChange={(v) => setPoDraft({ ...poDraft, buyer_id: v })}
+              options={memberOptions}
+              placeholder="默认当前登录人"
+            />
+          </Field>
 
           <div className="sm:col-span-4">
             <div className="flex items-center justify-between mb-1.5">
@@ -1428,6 +1517,79 @@ export default function Procurement() {
         </div>
       </Modal>
 
+      {/* ---------------- 付款登记 ---------------- */}
+      <Modal
+        open={!!payPo}
+        onClose={() => setPayPo(null)}
+        title="登记采购付款"
+        description={payPo ? `${payPo.po_no} · 应付 ${money(totalOf(payPo), payPo.currency)}` : undefined}
+        width="max-w-lg"
+        footer={
+          <>
+            <Button onClick={() => setPayPo(null)}>取消</Button>
+            <Button variant="primary" onClick={handlePay} loading={paying} icon={<CircleDollarSign className="w-3.5 h-3.5" />}>
+              确认付款
+            </Button>
+          </>
+        }
+      >
+        {payPo && (
+          <div className="space-y-3">
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { label: '应付总额', value: money(totalOf(payPo), payPo.currency), tone: 'text-ink-800' },
+                { label: '已付', value: money(payPo.paid_amount, payPo.currency), tone: 'text-emerald-600' },
+                {
+                  label: '未付',
+                  value: money(Math.max(0, totalOf(payPo) - Number(payPo.paid_amount || 0)), payPo.currency),
+                  tone: 'text-rose-600',
+                },
+              ].map((x) => (
+                <div key={x.label} className="rounded-lg border border-ink-200/70 bg-white px-3 py-2 text-center">
+                  <p className="text-[10.5px] text-ink-400">{x.label}</p>
+                  <p className={cn('num text-[13.5px] font-semibold mt-0.5', x.tone)}>{x.value}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="本次付款" required>
+                <input
+                  className="input num"
+                  type="number"
+                  step="0.01"
+                  value={payAmount}
+                  onChange={(e) => setPayAmount(e.target.value)}
+                />
+              </Field>
+              <Field label="付款日期">
+                <input className="input" type="date" value={payDate} onChange={(e) => setPayDate(e.target.value)} />
+              </Field>
+              <Field label="付款方式">
+                <Select value={payMethod} onChange={setPayMethod} options={PAY_METHODS} />
+              </Field>
+              <Field label="凭证号">
+                <input
+                  className="input"
+                  value={payVoucher}
+                  onChange={(e) => setPayVoucher(e.target.value)}
+                  placeholder="流水号 / 回单号"
+                />
+              </Field>
+            </div>
+
+            <Field label="备注">
+              <input className="input" value={payNote} onChange={(e) => setPayNote(e.target.value)} placeholder="如 预付 30%" />
+            </Field>
+
+            <p className="text-[11px] text-ink-500 leading-relaxed">
+              一张采购单可以分多次付款，系统按累计已付金额自动标记「未付款 / 部分付款 / 已付清」，
+              付款记录会进入该采购单的链路时间线，也会按付款人统计。
+            </p>
+          </div>
+        )}
+      </Modal>
+
       {/* ---------------- 登记到货 ---------------- */}
       <Modal
         open={!!receiptPo}
@@ -1487,24 +1649,19 @@ export default function Procurement() {
                   options={PURCHASE_WAREHOUSES.map((w) => ({ value: w, label: w }))}
                 />
               </Field>
-              <div className="flex items-start pt-6">
-                <label className="flex items-center gap-2 text-[12px] text-ink-600 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="w-3.5 h-3.5 accent-brand-600"
-                    checked={syncStock}
-                    disabled={!receiptPo.store_id}
-                    onChange={(e) => setSyncStock(e.target.checked)}
-                  />
-                  同步到库存可售数量
-                  {!receiptPo.store_id && <span className="text-[11px] text-rose-500">（采购单未指定店铺）</span>}
-                </label>
-              </div>
+              <Field label="库存去向" hint="入库会写流水；有店铺时自动累加到该店铺可售库存">
+                <div className="input !h-auto py-2 text-[11.5px] text-ink-600 leading-relaxed">
+                  {receiptPo.store_id
+                    ? '写入店铺库存 + 库存流水'
+                    : '仅写库存流水（采购单未指定店铺）'}
+                </div>
+              </Field>
             </div>
 
             <p className="text-[11px] text-ink-500 leading-relaxed">
-              收货会把到货数量累加到明细的「已到」，全部到齐后采购单状态自动变为「已入库」。
-              同步库存时不会改动商品档案成本；如需更新成本，请到「商品管理」调整。
+              确认收货会一次完成四件事：累加明细「已到」、写库存流水、增加店铺可售库存、
+              按本次采购价重算 SKU 加权成本并回写商品档案 —— 之后新订单的成本与利润会自动按新成本计算。
+              全部到齐后采购单状态自动变为「已入库」。
             </p>
           </div>
         )}

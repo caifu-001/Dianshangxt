@@ -14,6 +14,7 @@ import Products from './pages/Products'
 import Orders from './pages/Orders'
 import Inventory from './pages/Inventory'
 import Procurement from './pages/Procurement'
+import Suppliers from './pages/Suppliers'
 import Ads from './pages/Ads'
 import Creators from './pages/Creators'
 import Competitors from './pages/Competitors'
@@ -150,6 +151,7 @@ function AppRoutes() {
         <Route path="orders" element={<RequirePermission perm="orders.view"><Orders /></RequirePermission>} />
         <Route path="inventory" element={<RequirePermission perm="inventory.view"><Inventory /></RequirePermission>} />
         <Route path="purchase" element={<RequirePermission perm="purchase.view"><Procurement /></RequirePermission>} />
+        <Route path="suppliers" element={<RequirePermission perm="purchase.view"><Suppliers /></RequirePermission>} />
         <Route path="ads" element={<RequirePermission perm="ads.view"><Ads /></RequirePermission>} />
         <Route path="creators" element={<RequirePermission perm="creators.view"><Creators /></RequirePermission>} />
         <Route path="competitors" element={<RequirePermission perm="competitors.view"><Competitors /></RequirePermission>} />
