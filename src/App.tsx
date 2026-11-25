@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
-import { LogOut, Loader2 } from 'lucide-react'
+import type { ReactNode } from 'react'
+import { LogOut, Loader2, ShieldOff } from 'lucide-react'
 import { AuthProvider, useAuth } from './context/AuthContext'
 import { ToastProvider, Button } from './components/ui'
 import AppLayout from './components/Layout'
@@ -14,6 +15,7 @@ import Ads from './pages/Ads'
 import Creators from './pages/Creators'
 import Profit from './pages/Profit'
 import Tasks from './pages/Tasks'
+import Accounts from './pages/Accounts'
 import Settings from './pages/Settings'
 
 function FullScreenLoader({ label = '正在加载工作台…' }: { label?: string }) {
@@ -30,8 +32,38 @@ function FullScreenLoader({ label = '正在加载工作台…' }: { label?: stri
   )
 }
 
+/** 管理类页面的前端守卫；真正的拦截在数据库 RLS 与触发器 */
+function RequireStaff({ children }: { children: ReactNode }) {
+  const { isStaff } = useAuth()
+  if (!isStaff) return <Navigate to="/" replace />
+  return <>{children}</>
+}
+
+function AccountBlocked({ kind, onSignOut }: { kind: 'disabled' | 'missing'; onSignOut: () => void }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-ink-50 px-5">
+      <div className="w-full max-w-[420px] card p-8 text-center">
+        <div className="w-12 h-12 rounded-xl bg-rose-50 text-rose-600 flex items-center justify-center mx-auto">
+          <ShieldOff className="w-6 h-6" />
+        </div>
+        <h1 className="mt-4 text-[17px] font-semibold text-ink-900">
+          {kind === 'disabled' ? '账号已被禁用' : '账号档案不存在'}
+        </h1>
+        <p className="mt-2 text-[13px] leading-relaxed text-ink-500">
+          {kind === 'disabled'
+            ? '管理员已停用你的账号，业务数据暂时不可访问。需要恢复请联系团队的超级管理员。'
+            : '登录凭据有效，但系统中查不到对应的成员档案。请联系管理员在「账号管理」中恢复你的账号。'}
+        </p>
+        <Button className="mt-5" onClick={onSignOut} icon={<LogOut className="w-3.5 h-3.5" />}>
+          退出登录
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function AppRoutes() {
-  const { session, loading, schemaReady, signOut } = useAuth()
+  const { session, loading, schemaReady, blocked, signOut } = useAuth()
 
   if (loading) return <FullScreenLoader />
 
@@ -42,6 +74,8 @@ function AppRoutes() {
       </Routes>
     )
   }
+
+  if (blocked) return <AccountBlocked kind={blocked} onSignOut={() => void signOut()} />
 
   if (!schemaReady) {
     return (
@@ -78,6 +112,14 @@ function AppRoutes() {
         <Route path="creators" element={<Creators />} />
         <Route path="profit" element={<Profit />} />
         <Route path="tasks" element={<Tasks />} />
+        <Route
+          path="accounts"
+          element={
+            <RequireStaff>
+              <Accounts />
+            </RequireStaff>
+          }
+        />
         <Route path="settings" element={<Settings />} />
         <Route path="setup" element={<Setup />} />
         <Route path="*" element={<Navigate to="/" replace />} />

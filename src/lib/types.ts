@@ -6,6 +6,9 @@ export interface Profile {
   full_name: string | null
   company: string | null
   role: string
+  status: string
+  last_sign_in_at: string | null
+  note: string | null
   settings: Record<string, unknown>
   created_at: string
 }

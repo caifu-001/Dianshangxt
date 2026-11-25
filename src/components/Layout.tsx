@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import {
+  AlertTriangle,
   BarChart3,
   Boxes,
   ChevronDown,
@@ -14,16 +15,26 @@ import {
   Settings,
   ShoppingCart,
   Store as StoreIcon,
+  UserCog,
   Users,
   X,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
+import { ROLE_META } from '../lib/permissions'
 import { cn, initials } from '../lib/utils'
 import { Badge } from './ui'
 
 const NAV_GROUPS: Array<{
   title: string
-  items: Array<{ to: string; label: string; icon: typeof LayoutDashboard; end?: boolean; badge?: string }>
+  items: Array<{
+    to: string
+    label: string
+    icon: typeof LayoutDashboard
+    end?: boolean
+    badge?: string
+    /** 仅管理员及以上可见 */
+    staffOnly?: boolean
+  }>
 }> = [
   {
     title: '经营',
@@ -50,12 +61,15 @@ const NAV_GROUPS: Array<{
   },
   {
     title: '协同',
-    items: [{ to: '/tasks', label: '任务看板', icon: CheckSquare }],
+    items: [
+      { to: '/tasks', label: '任务看板', icon: CheckSquare },
+      { to: '/accounts', label: '账号管理', icon: UserCog, staffOnly: true },
+    ],
   },
 ]
 
 export default function AppLayout() {
-  const { profile, user, signOut, schemaReady } = useAuth()
+  const { profile, user, signOut, schemaReady, role, isStaff } = useAuth()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const location = useLocation()
@@ -66,6 +80,12 @@ export default function AppLayout() {
   }, [location.pathname])
 
   const displayName = profile?.full_name || user?.email?.split('@')[0] || '运营同学'
+
+  // 普通人员看不到管理类入口
+  const visibleGroups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter((item) => !item.staffOnly || isStaff),
+  })).filter((group) => group.items.length > 0)
 
   const sidebar = (
     <div className="flex flex-col h-full">
@@ -80,7 +100,7 @@ export default function AppLayout() {
       </div>
 
       <nav className="flex-1 overflow-y-auto px-2.5 pb-4 pt-1">
-        {NAV_GROUPS.map((group) => (
+        {visibleGroups.map((group) => (
           <div key={group.title} className="mb-3">
             <p className="px-2.5 py-1.5 text-[10px] font-semibold text-ink-400 tracking-widest">{group.title.toUpperCase()}</p>
             <div className="space-y-0.5">
@@ -150,7 +170,17 @@ export default function AppLayout() {
             {initials(displayName)}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-medium text-ink-800 truncate">{displayName}</p>
+            <div className="flex items-center gap-1.5">
+              <p className="text-xs font-medium text-ink-800 truncate">{displayName}</p>
+              <span
+                className={cn(
+                  'shrink-0 rounded border px-1 py-px text-[9px] leading-[1.5]',
+                  ROLE_META[role].badge,
+                )}
+              >
+                {ROLE_META[role].short}
+              </span>
+            </div>
             <p className="text-[10px] text-ink-400 truncate">{user?.email}</p>
           </div>
         </div>
@@ -234,6 +264,20 @@ export default function AppLayout() {
             </div>
           </div>
         </header>
+
+        {/* 旧版数据库缺少 status 列时，角色体系不生效，给出明确指引 */}
+        {profile && !('status' in profile) && (
+          <div className="px-4 sm:px-6 pt-4">
+            <div className="rounded-xl border border-amber-200/80 bg-amber-50 px-3.5 py-2.5 flex items-start gap-2">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
+              <p className="text-[11.5px] leading-relaxed text-amber-800">
+                数据库还没升级到角色权限版本，当前所有账号都会被识别为「普通人员」。
+                请到 <Link to="/setup" className="underline font-medium">数据源</Link> 页复制最新脚本，
+                在 Supabase SQL Editor 重新执行一次即可启用超级管理员 / 管理员 / 普通人员三级权限。
+              </p>
+            </div>
+          </div>
+        )}
 
         <main className="flex-1 px-4 sm:px-6 py-5 min-w-0">
           <Outlet />

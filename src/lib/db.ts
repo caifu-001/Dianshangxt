@@ -41,13 +41,19 @@ export async function updateRow<T>(table: string, id: string, values: Record<str
 }
 
 export async function deleteRow(table: string, id: string): Promise<void> {
-  const { error } = await db().from(table).delete().eq('id', id)
+  // 带上 select 才能知道到底删掉了几行：
+  // RLS 拒绝 delete 时 PostgREST 仍返回 204，若不加判断，界面会显示「已删除」但其实什么都没发生
+  const { data, error } = await db().from(table).delete().eq('id', id).select('id')
   if (error) throw new Error(error.message)
+  if (!data || data.length === 0) {
+    throw new Error('没有删除权限：普通人员只能新增与编辑，删除需要管理员角色')
+  }
 }
 
-/** 清空当前账号在指定表中的全部数据 */
-export async function deleteAllRows(table: string, userId: string): Promise<void> {
-  const { error } = await db().from(table).delete().eq('user_id', userId)
+/** 清空整张业务表（团队共享数据，仅管理员可通过 RLS 删除） */
+export async function deleteAllRows(table: string): Promise<void> {
+  // Supabase 要求 delete 必须带条件，这里用一个永远不成立的过滤，等价于清空全表
+  const { error } = await db().from(table).delete().not('id', 'is', null)
   if (error) throw new Error(error.message)
 }
 

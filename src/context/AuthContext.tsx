@@ -4,6 +4,7 @@ import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
 import { checkSchema, fetchRows } from '../lib/db'
 import type { Profile } from '../lib/types'
+import { type Role, isStaff as checkStaff, isSuperAdmin as checkSuper, normalizeRole } from '../lib/permissions'
 
 interface AuthContextValue {
   session: Session | null
@@ -12,6 +13,12 @@ interface AuthContextValue {
   loading: boolean
   schemaReady: boolean
   schemaMessage: string | null
+  /** 当前账号角色（super_admin / admin / member） */
+  role: Role
+  isStaff: boolean
+  isSuperAdmin: boolean
+  /** 账号被禁用或档案被移除时非空，用于阻断进入工作台 */
+  blocked: 'disabled' | 'missing' | null
   recheckSchema: () => Promise<boolean>
   signIn: (email: string, password: string) => Promise<void>
   signUp: (email: string, password: string, fullName: string) => Promise<{ needsConfirm: boolean }>
@@ -33,11 +40,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [schemaReady, setSchemaReady] = useState(true)
   const [schemaMessage, setSchemaMessage] = useState<string | null>(null)
+  const [blocked, setBlocked] = useState<'disabled' | 'missing' | null>(null)
 
   const loadProfile = useCallback(async (userId: string) => {
     try {
       const rows = await fetchRows<Profile>('profiles', { filters: [['id', 'eq', userId]], limit: 1 })
-      setProfile(rows[0] ?? null)
+      const next = rows[0] ?? null
+      setProfile(next)
+      // 被管理员禁用、或档案已被移除的账号，直接挡在工作台之外
+      if (!next) setBlocked('missing')
+      else if (next.status === 'disabled') setBlocked('disabled')
+      else setBlocked(null)
     } catch {
       setProfile(null)
     }
@@ -80,8 +93,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [loadProfile, recheckSchema])
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     if (error) throw new Error(translateAuthError(error.message))
+    // 记录最近登录时间，供账号管理页做审计（失败不影响登录）
+    if (data.user) {
+      void supabase
+        .from('profiles')
+        .update({ last_sign_in_at: new Date().toISOString() })
+        .eq('id', data.user.id)
+        .then(() => undefined, () => undefined)
+    }
   }, [])
 
   const signUp = useCallback(async (email: string, password: string, fullName: string) => {
@@ -137,19 +158,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await supabase.auth.signOut()
     setProfile(null)
+    setBlocked(null)
   }, [])
   const refreshProfile = useCallback(async () => {
     if (session?.user) await loadProfile(session.user.id)
   }, [loadProfile, session?.user])
 
-  const value = useMemo<AuthContextValue>(
-    () => ({
+  const value = useMemo<AuthContextValue>(() => {
+    const role: Role = normalizeRole(profile?.role)
+    return {
       session,
       user: session?.user ?? null,
       profile,
       loading,
       schemaReady,
       schemaMessage,
+      role,
+      isStaff: checkStaff(role),
+      isSuperAdmin: checkSuper(role),
+      blocked,
       recheckSchema,
       signIn,
       signUp,
@@ -158,9 +185,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       changePassword,
       signOut,
       refreshProfile,
-    }),
-    [session, profile, loading, schemaReady, schemaMessage, recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile],
-  )
+    }
+  }, [
+    session, profile, loading, schemaReady, schemaMessage, blocked,
+    recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile,
+  ])
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
 }
