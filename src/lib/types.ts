@@ -191,3 +191,105 @@ export interface Expense {
   remark: string | null
   created_at: string
 }
+
+/* ---------------- 竞品分析 ---------------- */
+
+export type CompetitorStatus = 'tracking' | 'paused' | 'archived'
+
+export interface Competitor {
+  id: string
+  user_id: string
+  store_id: string | null
+  /** 我方对标商品，用于算价差 */
+  product_id: string | null
+  platform: Platform
+  marketplace: string
+  asin: string | null
+  title: string
+  brand: string | null
+  url: string | null
+  image_url: string | null
+  currency: string
+  price: number
+  /** 划线价，用来算折扣力度 */
+  list_price: number
+  coupon: string | null
+  rating: number
+  reviews: number
+  bsr: number | null
+  est_monthly_sales: number
+  seller: string | null
+  category: string | null
+  status: CompetitorStatus
+  note: string | null
+  last_checked: string | null
+  created_at: string
+}
+
+export interface CompetitorSnapshot {
+  id: string
+  user_id: string
+  competitor_id: string
+  snapshot_date: string
+  price: number
+  rating: number
+  reviews: number
+  bsr: number | null
+  est_monthly_sales: number
+  note: string | null
+  created_at: string
+}
+
+/* ---------------- 采购 ---------------- */
+
+export interface Supplier {
+  id: string
+  user_id: string
+  name: string
+  contact: string | null
+  phone: string | null
+  email: string | null
+  address: string | null
+  category: string | null
+  payment_terms: string
+  lead_time_days: number
+  rating: number
+  status: 'active' | 'paused'
+  note: string | null
+  created_at: string
+}
+
+export type PurchaseStatus = 'draft' | 'ordered' | 'partial' | 'received' | 'cancelled'
+
+export interface PurchaseOrder {
+  id: string
+  user_id: string
+  po_no: string
+  supplier_id: string | null
+  store_id: string | null
+  warehouse: string
+  order_date: string
+  expected_date: string | null
+  currency: string
+  status: PurchaseStatus
+  shipping_fee: number
+  other_fee: number
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface PurchaseItem {
+  id: string
+  user_id: string
+  po_id: string
+  product_id: string | null
+  sku: string
+  title: string | null
+  quantity: number
+  unit_price: number
+  received_qty: number
+  /** 数据库生成列：quantity * unit_price */
+  amount: number
+  created_at: string
+}

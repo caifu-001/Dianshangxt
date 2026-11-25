@@ -125,10 +125,14 @@ export function RankBars({
   data,
   currency = 'USD',
   height = 240,
+  name = '销售额',
+  labelWidth = 110,
 }: {
   data: Array<{ name: string; value: number; extra?: string }>
   currency?: string
   height?: number
+  name?: string
+  labelWidth?: number
 }) {
   return (
     <div style={{ height }}>
@@ -142,11 +146,11 @@ export function RankBars({
             tick={{ ...AXIS, fontSize: 11 }}
             axisLine={false}
             tickLine={false}
-            width={110}
+            width={labelWidth}
             tickFormatter={(v: string) => (v.length > 12 ? `${v.slice(0, 12)}…` : v)}
           />
           <Tooltip content={<TooltipBox currency={currency} />} cursor={{ fill: '#f7f8fa' }} />
-          <Bar dataKey="value" name="销售额" fill="#3b6ef6" radius={[0, 4, 4, 0]} barSize={14} />
+          <Bar dataKey="value" name={name} fill="#3b6ef6" radius={[0, 4, 4, 0]} barSize={14} />
         </BarChart>
       </ResponsiveContainer>
     </div>

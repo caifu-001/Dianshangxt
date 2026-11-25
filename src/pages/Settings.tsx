@@ -26,15 +26,32 @@ import { PASSWORD_TONE_CLASS, checkPassword } from '../lib/password'
 import { cn, downloadTextFile, fmtDateTime } from '../lib/utils'
 import type { Profile } from '../lib/types'
 
-const CLEAR_ORDER = ['orders', 'inventory', 'campaigns', 'creators', 'expenses', 'tasks', 'products', 'stores']
+// 清空顺序按外键依赖排：子表在前、主表在后（级联删除也会兜底）
+const CLEAR_ORDER = [
+  'orders',
+  'inventory',
+  'purchase_items',
+  'purchase_orders',
+  'suppliers',
+  'campaigns',
+  'creators',
+  'competitors',
+  'expenses',
+  'tasks',
+  'products',
+  'stores',
+]
 
 const COUNTS: Array<{ table: string; label: string }> = [
   { table: 'stores', label: '店铺' },
   { table: 'products', label: '商品' },
   { table: 'orders', label: '订单' },
   { table: 'inventory', label: '库存' },
+  { table: 'purchase_orders', label: '采购单' },
+  { table: 'suppliers', label: '供应商' },
   { table: 'campaigns', label: '广告' },
   { table: 'creators', label: '达人' },
+  { table: 'competitors', label: '竞品' },
   { table: 'tasks', label: '任务' },
   { table: 'expenses', label: '费用' },
 ]
@@ -179,7 +196,13 @@ export default function Settings() {
     setClearing(true)
     try {
       for (const table of CLEAR_ORDER) {
-        await deleteAllRows(table)
+        try {
+          await deleteAllRows(table)
+        } catch (err) {
+          // 旧库还没跑过新版脚本时，新表不存在；跳过即可，不影响清空已有业务数据
+          const msg = err instanceof Error ? err.message : ''
+          if (!/数据表还没创建/.test(msg)) throw err
+        }
       }
       push('数据已清空')
       setClearOpen(false)
@@ -435,7 +458,7 @@ export default function Settings() {
             <div className="min-w-0 flex-1">
               <p className="text-[13px] font-medium text-rose-700">清空我的全部数据</p>
               <p className="mt-0.5 text-[11.5px] text-rose-600/70 leading-relaxed">
-                删除当前账号下的店铺、商品、订单、库存、广告、达人、任务与费用记录，账号本身保留。不可恢复。
+                删除店铺、商品、订单、库存、采购、广告、达人、竞品、任务与费用记录，账号本身保留。不可恢复。
               </p>
             </div>
             <Button size="sm" variant="danger" disabled={!canManageSystem} icon={<Trash2 className="w-3.5 h-3.5" />} onClick={() => setClearOpen(true)}>

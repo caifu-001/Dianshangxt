@@ -1,4 +1,4 @@
-import { fetchRows, insertRows, updateRow } from './db'
+import { fetchRows, insertRow, insertRows, updateRow } from './db'
 import { supabase } from './supabase'
 import { daysAgo } from './utils'
 import type { Platform } from './types'
@@ -220,7 +220,204 @@ export async function seedDemoData() {
     { store_id: stores[2].id, category: 'sample', amount: 86, currency: 'USD', expense_date: daysAgo(3), remark: '寄样快递费' },
   ])
 
-  // 9. 组织架构（演示用）：把当前账号归到一个部门 / 岗位 / 角色上，
+  // 9. 竞品分析：同站点竞品 + 近 48 天的价格 / 评论快照（表不存在时整体跳过）
+  try {
+    const competitorSeed = [
+      {
+        product: 0,
+        brand: 'Nordic Home',
+        asin: 'B0C9TR4Y21',
+        title: 'Bamboo Serving Tray Set with Handles, Extra Large (Set of 2)',
+        delta: 1.06,
+        rating: 4.6,
+        reviews: 3120,
+        bsr: 860,
+        monthly: 2400,
+        seller: 'Nordic Home LLC',
+      },
+      {
+        product: 2,
+        brand: 'Stone & Clay',
+        asin: 'B0D2MU7K83',
+        title: 'Speckled Stoneware Mug Set of 4, Handmade Glaze',
+        delta: 0.92,
+        rating: 4.7,
+        reviews: 5480,
+        bsr: 410,
+        monthly: 3600,
+        seller: 'Stone & Clay Studio',
+      },
+      {
+        product: 4,
+        brand: 'WoodCraft Co.',
+        asin: 'B0D5AC9P17',
+        title: 'Acacia Wood Cutting Board, Large with Deep Juice Groove',
+        delta: 1.14,
+        rating: 4.4,
+        reviews: 1860,
+        bsr: 1420,
+        monthly: 1500,
+        seller: 'WoodCraft Co.',
+      },
+      {
+        product: 5,
+        brand: 'PureGlow',
+        asin: 'B0D8VC2S65',
+        title: 'Vitamin C Serum 30ml with Hyaluronic Acid, Fragrance Free',
+        delta: 0.95,
+        rating: 4.5,
+        reviews: 7240,
+        bsr: 320,
+        monthly: 4200,
+        seller: 'PureGlow Beauty',
+      },
+      {
+        product: 7,
+        brand: 'JadeLux',
+        asin: 'B0E1JR8L30',
+        title: 'Jade Roller & Gua Sha Facial Set with Travel Pouch',
+        delta: 1.1,
+        rating: 4.3,
+        reviews: 980,
+        bsr: 2650,
+        monthly: 900,
+        seller: 'JadeLux Official',
+      },
+      {
+        product: 8,
+        brand: 'SilkCloud',
+        asin: 'GL-SLK-22M-A',
+        title: '22 Momme Silk Pillowcase, Hidden Zipper, Gift Box',
+        delta: 0.9,
+        rating: 4.8,
+        reviews: 4630,
+        bsr: 190,
+        monthly: 5200,
+        seller: 'SilkCloud',
+      },
+    ]
+
+    const competitorRows = await insertRows<{ id: string }>(
+      'competitors',
+      competitorSeed.map((c) => {
+        const product = PRODUCTS[c.product]
+        const store = STORES[product.store]
+        return {
+          store_id: stores[product.store].id,
+          product_id: products[c.product].id,
+          platform: store.platform,
+          marketplace: store.marketplace,
+          asin: c.asin,
+          title: c.title,
+          brand: c.brand,
+          currency: store.currency,
+          price: round2(product.price * c.delta),
+          list_price: round2(product.price * c.delta * 1.25),
+          coupon: c.delta < 1 ? 'Coupon 10%' : null,
+          rating: c.rating,
+          reviews: c.reviews,
+          bsr: c.bsr,
+          est_monthly_sales: c.monthly,
+          seller: c.seller,
+          category: product.category,
+          status: 'tracking',
+          last_checked: daysAgo(randInt(0, 2)),
+        }
+      }),
+    )
+
+    const snapshots: Array<Record<string, unknown>> = []
+    competitorSeed.forEach((c, idx) => {
+      const current = round2(PRODUCTS[c.product].price * c.delta)
+      const points = 17
+      for (let k = 0; k < points; k++) {
+        const t = k / (points - 1)
+        const isLast = k === points - 1
+        snapshots.push({
+          competitor_id: competitorRows[idx].id,
+          snapshot_date: daysAgo(Math.round(48 * (1 - t))),
+          price: isLast ? current : round2(current * (1 + 0.14 * (1 - t)) + rand(-0.35, 0.35)),
+          rating: isLast ? c.rating : round2(Math.max(3.6, c.rating - (1 - t) * 0.3)),
+          reviews: isLast ? c.reviews : Math.max(0, Math.round(c.reviews - (1 - t) * rand(60, 240))),
+          bsr: Math.round(c.bsr * (1 + (1 - t) * 0.4)),
+          est_monthly_sales: Math.round(c.monthly * (0.85 + t * 0.15)),
+        })
+      }
+    })
+    for (let i = 0; i < snapshots.length; i += 200) {
+      await insertRows('competitor_snapshots', snapshots.slice(i, i + 200))
+    }
+  } catch {
+    // 竞品表还没建（旧库未升级）：跳过这段演示数据
+  }
+
+  // 10. 采购：4 家供应商 + 5 张采购单（含部分到货 / 逾期未到各一张）
+  try {
+    const supplierRows = await insertRows<{ id: string }>(
+      'suppliers',
+      [
+        { name: '东莞恒美家居制品厂', contact: '王建国', phone: '138-2688-4471', email: 'sales@hengmeihome.cn', address: '广东东莞厚街镇家具大道 88 号', category: '竹木餐厨 / 家居', payment_terms: '30 天账期', lead_time_days: 25, rating: 5 },
+        { name: '义乌市雅陶瓷业有限公司', contact: '陈雅', phone: '139-5799-2210', email: 'chenya@yiyao-ceramic.com', address: '浙江义乌北苑工业区', category: '陶瓷餐具', payment_terms: '预付 30%', lead_time_days: 32, rating: 4 },
+        { name: '广州妆源生物科技', contact: '林曦', phone: '136-0208-9931', email: 'lily@zhuangyuan-bio.cn', address: '广州白云区太和镇', category: '护肤 / 美妆', payment_terms: '45 天账期', lead_time_days: 38, rating: 4 },
+        { name: '杭州丝语丝绸', contact: '周敏', phone: '137-5812-6677', email: 'zhoumin@siyu-silk.cn', address: '浙江杭州余杭区', category: '真丝家纺', payment_terms: '现结', lead_time_days: 20, rating: 5 },
+      ].map((s) => ({ ...s, status: 'active' })),
+    )
+
+    const poSeed: Array<{
+      supplier: number
+      daysBack: number
+      status: 'ordered' | 'partial' | 'received'
+      warehouse: string
+      shipping: number
+      items: Array<{ p: number; qty: number }>
+    }> = [
+      { supplier: 0, daysBack: 52, status: 'received', warehouse: '深圳仓', shipping: 4800, items: [{ p: 0, qty: 800 }, { p: 1, qty: 600 }, { p: 4, qty: 400 }] },
+      { supplier: 1, daysBack: 38, status: 'received', warehouse: '国内仓', shipping: 2600, items: [{ p: 2, qty: 500 }, { p: 3, qty: 900 }] },
+      { supplier: 2, daysBack: 24, status: 'partial', warehouse: '国内仓', shipping: 1800, items: [{ p: 5, qty: 1200 }, { p: 6, qty: 800 }] },
+      { supplier: 3, daysBack: 45, status: 'ordered', warehouse: '宁波仓', shipping: 3200, items: [{ p: 8, qty: 1500 }] },
+      { supplier: 0, daysBack: 5, status: 'ordered', warehouse: '深圳仓', shipping: 1500, items: [{ p: 0, qty: 600 }, { p: 9, qty: 2000 }] },
+    ]
+
+    const purchaseItems: Array<Record<string, unknown>> = []
+    for (let i = 0; i < poSeed.length; i++) {
+      const seed = poSeed[i]
+      const orderDate = daysAgo(seed.daysBack)
+      const storeIndex = PRODUCTS[seed.items[0].p].store
+      const po = await insertRow<{ id: string }>('purchase_orders', {
+        po_no: `PO-${orderDate.replace(/-/g, '').slice(2)}-0${i + 1}`,
+        supplier_id: supplierRows[seed.supplier].id,
+        store_id: stores[storeIndex].id,
+        warehouse: seed.warehouse,
+        order_date: orderDate,
+        expected_date: daysAgo(seed.daysBack - (STORES[storeIndex].platform === 'amazon' ? 35 : 20)),
+        currency: 'CNY',
+        status: seed.status,
+        shipping_fee: seed.shipping,
+        other_fee: 0,
+        note: seed.status === 'partial' ? '首批先到 60%，剩余随下一柜' : null,
+      })
+
+      for (const line of seed.items) {
+        const product = PRODUCTS[line.p]
+        const received =
+          seed.status === 'received' ? line.qty : seed.status === 'partial' ? Math.round(line.qty * 0.6) : 0
+        purchaseItems.push({
+          po_id: po.id,
+          product_id: products[line.p].id,
+          sku: product.sku,
+          title: product.title,
+          quantity: line.qty,
+          unit_price: round2(product.cost * 7.1),
+          received_qty: received,
+        })
+      }
+    }
+    await insertRows('purchase_items', purchaseItems)
+  } catch {
+    // 采购表还没建：跳过
+  }
+
+  // 11. 组织架构（演示用）：把当前账号归到一个部门 / 岗位 / 角色上，
   //    这样「组织架构」页不会是空的。表不存在（旧库未升级）时整体跳过。
   try {
     const { data: authData } = await supabase.auth.getUser()

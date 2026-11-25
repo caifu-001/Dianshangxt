@@ -12,8 +12,10 @@ import Stores from './pages/Stores'
 import Products from './pages/Products'
 import Orders from './pages/Orders'
 import Inventory from './pages/Inventory'
+import Procurement from './pages/Procurement'
 import Ads from './pages/Ads'
 import Creators from './pages/Creators'
+import Competitors from './pages/Competitors'
 import Profit from './pages/Profit'
 import Tasks from './pages/Tasks'
 import Accounts from './pages/Accounts'
@@ -123,8 +125,10 @@ function AppRoutes() {
         <Route path="products" element={<RequirePermission perm="products.view"><Products /></RequirePermission>} />
         <Route path="orders" element={<RequirePermission perm="orders.view"><Orders /></RequirePermission>} />
         <Route path="inventory" element={<RequirePermission perm="inventory.view"><Inventory /></RequirePermission>} />
+        <Route path="purchase" element={<RequirePermission perm="purchase.view"><Procurement /></RequirePermission>} />
         <Route path="ads" element={<RequirePermission perm="ads.view"><Ads /></RequirePermission>} />
         <Route path="creators" element={<RequirePermission perm="creators.view"><Creators /></RequirePermission>} />
+        <Route path="competitors" element={<RequirePermission perm="competitors.view"><Competitors /></RequirePermission>} />
         <Route path="profit" element={<RequirePermission perm="profit.view"><Profit /></RequirePermission>} />
         <Route path="tasks" element={<RequirePermission perm="tasks.view"><Tasks /></RequirePermission>} />
         {/* 组织架构对全员可见（通讯录），编辑按钮按 org.manage 收敛 */}

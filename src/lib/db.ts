@@ -12,6 +12,9 @@ function translateDbError(message: string): string {
   if (/row-level security policy/i.test(message)) {
     return '你的岗位角色没有该操作的权限，请联系管理员在「账号管理」中调整角色'
   }
+  if (/relation .* does not exist|could not find the table/i.test(message)) {
+    return '该功能的数据表还没创建，请到「数据源」页复制最新脚本，在 Supabase SQL Editor 重新执行一次'
+  }
   if (/duplicate key value/i.test(message)) {
     return '记录已存在（SKU / 订单号等唯一键重复）'
   }
@@ -76,6 +79,16 @@ export async function deleteAllRows(table: string): Promise<void> {
   // Supabase 要求 delete 必须带条件，这里用一个永远不成立的过滤，等价于清空全表
   const { error } = await db().from(table).delete().not('id', 'is', null)
   if (error) throw new Error(translateDbError(error.message))
+}
+
+/**
+ * 按条件批量删除（用于「重写采购明细」这类子表操作）。
+ * 与 deleteRow 不同，这里删 0 行不报错：子表可能本来就是空的。
+ */
+export async function deleteWhere(table: string, column: string, value: string): Promise<number> {
+  const { data, error } = await db().from(table).delete().eq(column, value).select('id')
+  if (error) throw new Error(translateDbError(error.message))
+  return (data ?? []).length
 }
 
 export async function countRows(table: string): Promise<number> {

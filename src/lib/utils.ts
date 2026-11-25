@@ -98,6 +98,12 @@ export function relativeDay(d?: string | null) {
   return `${diff} 天后`
 }
 
+/** target 距 base（默认今天）的天数，正数=未来，负数=已过去 */
+export function dayDiff(target?: string | null, base?: string | null) {
+  if (!target) return 0
+  return dayjs(target).startOf('day').diff(base ? dayjs(base).startOf('day') : dayjs().startOf('day'), 'day')
+}
+
 export function sum<T>(rows: T[], pick: (row: T) => number | null | undefined) {
   return rows.reduce((acc, row) => acc + Number(pick(row) ?? 0), 0)
 }

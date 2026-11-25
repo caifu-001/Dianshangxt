@@ -329,6 +329,124 @@ create index if not exists idx_profiles_department on public.profiles(department
 create index if not exists idx_profiles_position   on public.profiles(position_id);
 create index if not exists idx_profiles_role_id    on public.profiles(role_id);
 
+-- -------------------------------------------------------------
+-- 11. 竞品分析：跟踪竞品的价格 / 评分 / BSR
+--     competitors 存最近一次采集值（列表页直接读，避免每次汇总）
+--     competitor_snapshots 存按日快照，用于画趋势曲线
+-- -------------------------------------------------------------
+create table if not exists public.competitors (
+  id                uuid primary key default gen_random_uuid(),
+  user_id           uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  store_id          uuid references public.stores(id) on delete set null,
+  product_id        uuid references public.products(id) on delete set null,  -- 我方对标商品
+  platform          text not null default 'amazon' check (platform in ('amazon', 'tiktok')),
+  marketplace       text not null default 'US',
+  asin              text,
+  title             text not null,
+  brand             text,
+  url               text,
+  image_url         text,
+  currency          text not null default 'USD',
+  price             numeric(12,2) not null default 0,   -- 当前售价
+  list_price        numeric(12,2) not null default 0,   -- 划线价，用于算折扣
+  coupon            text,                               -- 优惠券 / 促销描述
+  rating            numeric(3,2) not null default 0 check (rating >= 0 and rating <= 5),
+  reviews           integer not null default 0,
+  bsr               integer,                            -- 类目排名
+  est_monthly_sales integer not null default 0,         -- 预估月销
+  seller            text,
+  category          text,
+  status            text not null default 'tracking'
+                    check (status in ('tracking', 'paused', 'archived')),
+  note              text,
+  last_checked      date,                               -- 最近一次采集日期
+  created_at        timestamptz not null default now()
+);
+create index if not exists idx_competitors_user   on public.competitors(user_id);
+create index if not exists idx_competitors_status on public.competitors(status);
+-- 同一站点同一个 ASIN 只跟踪一次（ASIN 为空时不去重，允许手动录 TikTok 商品）
+create unique index if not exists uq_competitors_asin
+  on public.competitors(platform, marketplace, asin) where asin is not null;
+
+create table if not exists public.competitor_snapshots (
+  id                uuid primary key default gen_random_uuid(),
+  user_id           uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  competitor_id     uuid not null references public.competitors(id) on delete cascade,
+  snapshot_date     date not null default current_date,
+  price             numeric(12,2) not null default 0,
+  rating            numeric(3,2) not null default 0,
+  reviews           integer not null default 0,
+  bsr               integer,
+  est_monthly_sales integer not null default 0,
+  note              text,
+  created_at        timestamptz not null default now(),
+  unique (competitor_id, snapshot_date)
+);
+create index if not exists idx_comp_snap_competitor
+  on public.competitor_snapshots(competitor_id, snapshot_date desc);
+
+-- -------------------------------------------------------------
+-- 12. 采购：供应商 / 采购单 / 采购明细
+--     采购单金额不落库，由明细行 amount 汇总，避免主表与明细不一致
+-- -------------------------------------------------------------
+create table if not exists public.suppliers (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  name           text not null,
+  contact        text,
+  phone          text,
+  email          text,
+  address        text,
+  category       text,                                  -- 主营品类
+  payment_terms  text not null default '现结',           -- 现结 / 30 天 / 60 天
+  lead_time_days integer not null default 30,           -- 生产 + 头程交期
+  rating         integer not null default 3 check (rating between 1 and 5),
+  status         text not null default 'active' check (status in ('active', 'paused')),
+  note           text,
+  created_at     timestamptz not null default now()
+);
+create unique index if not exists uq_suppliers_name on public.suppliers(name);
+create index if not exists idx_suppliers_status on public.suppliers(status);
+
+create table if not exists public.purchase_orders (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  po_no         text not null,
+  supplier_id   uuid references public.suppliers(id) on delete set null,
+  store_id      uuid references public.stores(id) on delete set null,
+  warehouse     text not null default '国内仓',
+  order_date    date not null default current_date,
+  expected_date date,                                   -- 预计到仓
+  currency      text not null default 'CNY',
+  status        text not null default 'draft'
+                check (status in ('draft', 'ordered', 'partial', 'received', 'cancelled')),
+  shipping_fee  numeric(12,2) not null default 0,       -- 头程 / 运费
+  other_fee     numeric(12,2) not null default 0,
+  note          text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create unique index if not exists uq_purchase_orders_no on public.purchase_orders(po_no);
+create index if not exists idx_po_supplier on public.purchase_orders(supplier_id);
+create index if not exists idx_po_status   on public.purchase_orders(status);
+create index if not exists idx_po_date     on public.purchase_orders(order_date desc);
+
+create table if not exists public.purchase_items (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  po_id        uuid not null references public.purchase_orders(id) on delete cascade,
+  product_id   uuid references public.products(id) on delete set null,
+  sku          text not null,
+  title        text,
+  quantity     integer not null default 1,
+  unit_price   numeric(12,2) not null default 0,        -- 采购单价（不含运费）
+  received_qty integer not null default 0,              -- 已到货数量
+  amount       numeric(14,2) generated always as (quantity * unit_price) stored,
+  created_at   timestamptz not null default now()
+);
+create index if not exists idx_purchase_items_po  on public.purchase_items(po_id);
+create index if not exists idx_purchase_items_sku on public.purchase_items(sku);
+
 -- =============================================================
 --  行级安全（RLS）与角色权限
 --  权限模型：团队共享同一份业务数据，按角色控制「可删 / 可管人」
@@ -416,6 +534,7 @@ declare
   tabs text[] := array[
     'profiles','stores','products','orders','inventory',
     'campaigns','creators','tasks','expenses',
+    'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
     'departments','positions','roles'
   ];
 begin
@@ -476,7 +595,10 @@ begin
       ('campaigns', 'ads'),
       ('creators',  'creators'),
       ('tasks',     'tasks'),
-      ('expenses',  'profit')
+      ('expenses',  'profit'),
+      ('competitors','competitors'),
+      ('suppliers', 'purchase'),
+      ('purchase_orders', 'purchase')
     ) as v(tbl, perm)
   loop
     -- 清理历史策略（旧版为 xxx_owner_all，按 user_id 隔离）
@@ -501,6 +623,45 @@ begin
     execute format(
       'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L))',
       rec.tbl || '_delete', rec.tbl, 'data.delete'
+    );
+  end loop;
+end;
+$do$;
+
+-- ---------- 子表（竞品快照 / 采购明细） ----------
+-- 这两张表只服务于主表的编辑流程：改一次采购单＝重写明细，
+-- 因此 delete 跟随主表的 edit 权限，而不是 data.delete，
+-- 否则「能编辑但无删除权」的岗位一改单子就会被 RLS 拒绝。
+do $do$
+declare
+  rec record;
+begin
+  for rec in
+    select * from (values
+      ('competitor_snapshots', 'competitors'),
+      ('purchase_items',       'purchase')
+    ) as v(tbl, perm)
+  loop
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_select', rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_insert', rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_update', rec.tbl);
+    execute format('drop policy if exists %I on public.%I', rec.tbl || '_delete', rec.tbl);
+
+    execute format(
+      'create policy %I on public.%I for select to authenticated using (public.has_permission(%L))',
+      rec.tbl || '_select', rec.tbl, rec.perm || '.view'
+    );
+    execute format(
+      'create policy %I on public.%I for insert to authenticated with check (public.has_permission(%L))',
+      rec.tbl || '_insert', rec.tbl, rec.perm || '.edit'
+    );
+    execute format(
+      'create policy %I on public.%I for update to authenticated using (public.has_permission(%L)) with check (public.has_permission(%L))',
+      rec.tbl || '_update', rec.tbl, rec.perm || '.edit', rec.perm || '.edit'
+    );
+    execute format(
+      'create policy %I on public.%I for delete to authenticated using (public.has_permission(%L))',
+      rec.tbl || '_delete', rec.tbl, rec.perm || '.edit'
     );
   end loop;
 end;
@@ -613,6 +774,8 @@ grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on
   public.profiles, public.stores, public.products, public.orders,
   public.inventory, public.campaigns, public.creators, public.tasks, public.expenses,
+  public.competitors, public.competitor_snapshots,
+  public.suppliers, public.purchase_orders, public.purchase_items,
   public.departments, public.positions, public.roles
   to authenticated;
 
@@ -659,6 +822,32 @@ from (values
          'ads.view','creators.view','profit.view','tasks.view']::text[], 5)
 ) as v(name, description, permissions, sort_order)
 where not exists (select 1 from public.roles);
+
+-- 新增模块的权限补齐：内置角色只在表为空时插入，
+-- 老库重跑脚本时不会重新生成，这里按「缺什么补什么」的方式补上，
+-- 已经存在的权限码不会重复，也不会覆盖管理员手工调整过的其他权限。
+do $do$
+declare
+  rec record;
+begin
+  for rec in
+    select * from (values
+      ('运营专员',   'competitors.view'), ('运营专员', 'competitors.edit'),
+      ('运营专员',   'purchase.view'),    ('运营专员', 'purchase.edit'),
+      ('广告投手',   'competitors.view'), ('广告投手', 'competitors.edit'),
+      ('内容达人',   'competitors.view'),
+      ('财务核算',   'purchase.view'),
+      ('只读观察员', 'competitors.view'), ('只读观察员', 'purchase.view')
+    ) as v(role_name, code)
+  loop
+    update public.roles
+       set permissions = array_append(permissions, rec.code)
+     where name = rec.role_name
+       and is_system
+       and not (rec.code = any(permissions));
+  end loop;
+end;
+$do$;
 
 -- 历史数据里若还没有超级管理员，把最早注册的账号提升上来，避免没人能管账号
 select public.ensure_super_admin();

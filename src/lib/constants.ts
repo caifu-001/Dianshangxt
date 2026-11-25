@@ -110,3 +110,37 @@ export const EXPENSE_CATEGORY: Record<string, string> = {
   tax: '税费',
   other: '其他',
 }
+
+/* ---------------- 竞品分析 ---------------- */
+
+export const COMPETITOR_STATUS: Record<string, { label: string; tone: 'gray' | 'blue' | 'green' | 'red' | 'amber' }> = {
+  tracking: { label: '跟踪中', tone: 'green' },
+  paused: { label: '已暂停', tone: 'amber' },
+  archived: { label: '已归档', tone: 'gray' },
+}
+
+/** 竞品相对我方售价的位置：决定列表里的预警颜色 */
+export const PRICE_POSITION: Record<string, { label: string; tone: 'green' | 'amber' | 'red' | 'gray' }> = {
+  lower: { label: '低于我方', tone: 'red' },
+  similar: { label: '价格接近', tone: 'amber' },
+  higher: { label: '高于我方', tone: 'green' },
+}
+
+/* ---------------- 采购 ---------------- */
+
+export const PO_STATUS: Record<string, { label: string; tone: 'gray' | 'blue' | 'green' | 'red' | 'amber' }> = {
+  draft: { label: '草稿', tone: 'gray' },
+  ordered: { label: '待到货', tone: 'blue' },
+  partial: { label: '部分到货', tone: 'amber' },
+  received: { label: '已入库', tone: 'green' },
+  cancelled: { label: '已取消', tone: 'gray' },
+}
+
+export const SUPPLIER_STATUS: Record<string, { label: string; tone: 'gray' | 'blue' | 'green' | 'red' | 'amber' }> = {
+  active: { label: '合作中', tone: 'green' },
+  paused: { label: '已暂停', tone: 'amber' },
+}
+
+export const PAYMENT_TERMS = ['现结', '预付 30%', '30 天账期', '45 天账期', '60 天账期', '90 天账期']
+
+export const PURCHASE_WAREHOUSES = ['国内仓', '深圳仓', '义乌仓', '宁波仓', 'US-3PL', 'UK-3PL', 'FBA-US', 'FBA-UK', 'FBA-DE']

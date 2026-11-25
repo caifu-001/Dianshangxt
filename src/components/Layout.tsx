@@ -16,6 +16,8 @@ import {
   Settings,
   ShoppingCart,
   Store as StoreIcon,
+  Telescope,
+  Truck,
   UserCog,
   Users,
   X,
@@ -50,6 +52,7 @@ const NAV_GROUPS: Array<{
     items: [
       { to: '/orders', label: '订单管理', icon: ShoppingCart, perm: 'orders.view' },
       { to: '/inventory', label: '库存管理', icon: Boxes, perm: 'inventory.view' },
+      { to: '/purchase', label: '采购管理', icon: Truck, perm: 'purchase.view' },
       { to: '/profit', label: '利润核算', icon: BarChart3, perm: 'profit.view' },
     ],
   },
@@ -58,6 +61,7 @@ const NAV_GROUPS: Array<{
     items: [
       { to: '/ads', label: '广告投放', icon: Megaphone, perm: 'ads.view' },
       { to: '/creators', label: '达人合作', icon: Users, badge: 'TikTok', perm: 'creators.view' },
+      { to: '/competitors', label: '竞品分析', icon: Telescope, perm: 'competitors.view' },
     ],
   },
   {

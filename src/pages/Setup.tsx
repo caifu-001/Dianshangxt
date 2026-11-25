@@ -80,7 +80,7 @@ export default function Setup() {
           </p>
           <p className="mt-0.5 text-xs text-ink-600 leading-relaxed">
             {schemaReady
-              ? '九张业务表与行级权限均已生效，可以直接开始录入数据。'
+              ? '业务表与行级权限均已生效，可以直接开始录入数据。'
               : schemaMessage ?? '需要执行建表脚本后才能使用系统功能。'}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-500">
@@ -134,7 +134,7 @@ export default function Setup() {
           生成演示数据
         </Button>
         <span className="text-[11px] text-ink-400">
-          演示数据包含 3 家店铺、11 个 SKU、近 60 天订单，可随时在「系统设置」中清空
+          演示数据包含 3 家店铺、11 个 SKU、近 60 天订单，以及竞品、供应商与采购单，可随时在「系统设置」中清空
         </span>
       </div>
     </div>

@@ -61,8 +61,10 @@ export type PermissionCode =
   | 'products.view' | 'products.edit'
   | 'orders.view' | 'orders.edit'
   | 'inventory.view' | 'inventory.edit'
+  | 'purchase.view' | 'purchase.edit'
   | 'ads.view' | 'ads.edit'
   | 'creators.view' | 'creators.edit'
+  | 'competitors.view' | 'competitors.edit'
   | 'profit.view' | 'profit.edit'
   | 'tasks.view' | 'tasks.edit'
   | 'data.delete'
@@ -85,9 +87,11 @@ export const MODULES: ModuleDef[] = [
   { key: 'products', label: '商品管理', desc: 'SKU、成本与售价', view: 'products.view', edit: 'products.edit', group: '经营' },
   { key: 'orders', label: '订单管理', desc: '订单、退款与利润明细', view: 'orders.view', edit: 'orders.edit', group: '交易' },
   { key: 'inventory', label: '库存管理', desc: '库存水位与补货建议', view: 'inventory.view', edit: 'inventory.edit', group: '交易' },
+  { key: 'purchase', label: '采购管理', desc: '供应商、采购单与到货入库', view: 'purchase.view', edit: 'purchase.edit', group: '交易' },
   { key: 'profit', label: '利润核算', desc: 'P&L 与费用台账', view: 'profit.view', edit: 'profit.edit', group: '交易' },
   { key: 'ads', label: '广告投放', desc: '广告活动与 ACOS', view: 'ads.view', edit: 'ads.edit', group: '增长' },
   { key: 'creators', label: '达人合作', desc: 'TikTok 达人建联与内容', view: 'creators.view', edit: 'creators.edit', group: '增长' },
+  { key: 'competitors', label: '竞品分析', desc: '竞品价格、评分与排名监控', view: 'competitors.view', edit: 'competitors.edit', group: '增长' },
   { key: 'tasks', label: '任务看板', desc: '运营任务与协作', view: 'tasks.view', edit: 'tasks.edit', group: '协同' },
 ]
 
