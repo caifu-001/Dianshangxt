@@ -27,7 +27,6 @@ import {
   Truck,
   Wallet,
   UserCog,
-  Users,
   X,
 } from 'lucide-react'
 import { useAuth } from '../context/AuthContext'
@@ -74,8 +73,7 @@ const NAV_GROUPS: Array<{
   {
     title: '增长',
     items: [
-      { to: '/ads', label: '广告投放', icon: Megaphone, perm: 'ads.view' },
-      { to: '/creators', label: '达人合作', icon: Users, badge: 'TikTok', perm: 'creators.view' },
+      { to: '/onsite-brand', label: '站内品牌营销', icon: Megaphone, perms: ['ads.view', 'creators.view'] },
       { to: '/competitors', label: '竞品分析', icon: Telescope, perm: 'competitors.view' },
       { to: '/brand', label: '站外品牌营销', icon: Globe2, perm: 'brand.view' },
     ],

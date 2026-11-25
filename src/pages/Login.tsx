@@ -22,8 +22,8 @@ import { cn } from '../lib/utils'
 const FEATURES = [
   { icon: BarChart3, title: '利润核算', desc: '佣金、FBA、广告、退款逐笔拆解' },
   { icon: Boxes, title: '库存预警', desc: '可售天数与智能补货建议' },
-  { icon: Megaphone, title: '广告监控', desc: 'ACOS / ROAS / 转化率实时看板' },
-  { icon: Users, title: '达人合作', desc: 'TikTok 达人漏斗与带货 GMV' },
+  { icon: Megaphone, title: '站内广告', desc: 'ACOS / ROAS / 转化率实时看板' },
+  { icon: Users, title: '达人营销', desc: 'TikTok 达人漏斗与带货 GMV' },
 ]
 
 const OTP_COOLDOWN_SEC = 60

@@ -15,8 +15,7 @@ import Orders from './pages/Orders'
 import Inventory from './pages/Inventory'
 import Procurement from './pages/Procurement'
 import Suppliers from './pages/Suppliers'
-import Ads from './pages/Ads'
-import Creators from './pages/Creators'
+import OnsiteBrand from './pages/OnsiteBrand'
 import Competitors from './pages/Competitors'
 import Brand from './pages/Brand'
 import Development from './pages/Development'
@@ -156,8 +155,17 @@ function AppRoutes() {
         <Route path="inventory" element={<RequirePermission perm="inventory.view"><Inventory /></RequirePermission>} />
         <Route path="purchase" element={<RequirePermission perm="purchase.view"><Procurement /></RequirePermission>} />
         <Route path="suppliers" element={<RequirePermission perm="purchase.view"><Suppliers /></RequirePermission>} />
-        <Route path="ads" element={<RequirePermission perm="ads.view"><Ads /></RequirePermission>} />
-        <Route path="creators" element={<RequirePermission perm="creators.view"><Creators /></RequirePermission>} />
+        <Route
+          path="onsite-brand"
+          element={
+            <RequirePermission anyOf={['ads.view', 'creators.view']}>
+              <OnsiteBrand />
+            </RequirePermission>
+          }
+        />
+        {/* 旧入口重定向：历史链接与收藏夹跳到站内品牌营销对应标签 */}
+        <Route path="ads" element={<Navigate to="/onsite-brand?tab=ads" replace />} />
+        <Route path="creators" element={<Navigate to="/onsite-brand?tab=creators" replace />} />
         <Route path="competitors" element={<RequirePermission perm="competitors.view"><Competitors /></RequirePermission>} />
         <Route path="brand" element={<RequirePermission perm="brand.view"><Brand /></RequirePermission>} />
         <Route path="profit" element={<RequirePermission perm="profit.view"><Profit /></RequirePermission>} />

@@ -329,8 +329,8 @@ export const EXPENSE_SUB_ITEMS: Record<string, string[]> = {
 /** 费用来源模块元数据：广告投放 / 达人合作 / 站外品牌营销 / 手工记账 */
 export const EXPENSE_SOURCE_META: Record<string, { label: string; short: string; tone: string; path: string }> = {
   manual:  { label: '手工记账', short: '手工', tone: 'bg-ink-100 text-ink-600', path: '' },
-  ads:     { label: '广告投放', short: '广告', tone: 'bg-brand-50 text-brand-700', path: '/ads' },
-  creator: { label: '达人合作', short: '达人', tone: 'bg-violet-50 text-violet-700', path: '/creators' },
+  ads:     { label: '广告投放', short: '广告', tone: 'bg-brand-50 text-brand-700', path: '/onsite-brand?tab=ads' },
+  creator: { label: '达人合作', short: '达人', tone: 'bg-violet-50 text-violet-700', path: '/onsite-brand?tab=creators' },
   brand:   { label: '站外品牌营销', short: '品牌', tone: 'bg-orange-50 text-orange-700', path: '/brand' },
 }
 

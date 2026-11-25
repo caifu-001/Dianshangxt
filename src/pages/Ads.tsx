@@ -58,7 +58,7 @@ const EMPTY: FormState = {
   note: '',
 }
 
-export default function Ads() {
+export default function Ads({ embedded = false }: { embedded?: boolean }) {
   const { push } = useToast()
   const [search, setSearch] = useState('')
   const [storeFilter, setStoreFilter] = useState('')
@@ -228,22 +228,34 @@ export default function Ads() {
     ? ['GMV_MAX', 'VIDEO', 'LIVE', 'PSA']
     : ['SP', 'SB', 'SD']
 
+  const headerActions = (
+    <>
+      <Link to="/expenses?source=ads" className="btn btn-sm btn-default">
+        <Receipt className="w-3.5 h-3.5" /> 广告费用归集
+      </Link>
+      <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate} disabled={!data?.stores.length}>
+        新建广告活动
+      </Button>
+    </>
+  )
+
   return (
     <>
-      <PageHeader
-        title="广告投放"
-        description="ACOS、ROAS、点击转化率一屏掌握，超目标的活动一眼看穿"
-        actions={
-          <>
-            <Link to="/expenses?source=ads" className="btn btn-sm btn-default">
-              <Receipt className="w-3.5 h-3.5" /> 广告费用归集
-            </Link>
-            <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate} disabled={!data?.stores.length}>
-              新建广告活动
-            </Button>
-          </>
-        }
-      />
+      {embedded ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div>
+            <h2 className="text-[14px] font-semibold text-ink-900">广告投放</h2>
+            <p className="text-[11px] text-ink-500">ACOS、ROAS、点击转化率一屏掌握</p>
+          </div>
+          <div className="flex items-center gap-2">{headerActions}</div>
+        </div>
+      ) : (
+        <PageHeader
+          title="广告投放"
+          description="ACOS、ROAS、点击转化率一屏掌握，超目标的活动一眼看穿"
+          actions={headerActions}
+        />
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
         {[

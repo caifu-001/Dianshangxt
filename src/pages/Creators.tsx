@@ -59,7 +59,7 @@ const EMPTY: FormState = {
   note: '',
 }
 
-export default function Creators() {
+export default function Creators({ embedded = false }: { embedded?: boolean }) {
   const { push } = useToast()
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
@@ -190,22 +190,34 @@ export default function Creators() {
 
   const maxFunnel = Math.max(1, ...funnel.map((f) => f.count))
 
+  const headerActions = (
+    <>
+      <Link to="/expenses?source=creator" className="btn btn-sm btn-default">
+        <Receipt className="w-3.5 h-3.5" /> 达人费用归集
+      </Link>
+      <Button variant="primary" icon={<UserPlus className="w-3.5 h-3.5" />} onClick={openCreate}>
+        添加达人
+      </Button>
+    </>
+  )
+
   return (
     <>
-      <PageHeader
-        title="达人合作"
-        description="TikTok 达人从建联到带货的全流程台账"
-        actions={
-          <>
-            <Link to="/expenses?source=creator" className="btn btn-sm btn-default">
-              <Receipt className="w-3.5 h-3.5" /> 达人费用归集
-            </Link>
-            <Button variant="primary" icon={<UserPlus className="w-3.5 h-3.5" />} onClick={openCreate}>
-              添加达人
-            </Button>
-          </>
-        }
-      />
+      {embedded ? (
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div>
+            <h2 className="text-[14px] font-semibold text-ink-900">达人合作</h2>
+            <p className="text-[11px] text-ink-500">TikTok 达人从建联到带货的全流程台账</p>
+          </div>
+          <div className="flex items-center gap-2">{headerActions}</div>
+        </div>
+      ) : (
+        <PageHeader
+          title="达人合作"
+          description="TikTok 达人从建联到带货的全流程台账"
+          actions={headerActions}
+        />
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
         {[
