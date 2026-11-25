@@ -356,6 +356,43 @@ export async function seedDemoData() {
     // 竞品表还没建（旧库未升级）：跳过这段演示数据
   }
 
+  // 9.5 站外品牌营销：社媒账号 / 站外红人 / 公关 / 曝光搜索量
+  try {
+    await insertRows('brand_social_accounts', [
+      { platform: 'YouTube', account_name: 'HomyLife Official', account_url: 'https://youtube.com/@homylife', followers: 128000, posts_count: 86, status: 'active', note: '开箱与场景化短视频' },
+      { platform: 'Instagram', account_name: 'homylife_home', account_url: 'https://instagram.com/homylife_home', followers: 64200, posts_count: 214, status: 'active', note: '家居搭配图集' },
+      { platform: 'TikTok', account_name: 'homylife.us', account_url: 'https://tiktok.com/@homylife.us', followers: 93500, posts_count: 152, status: 'active' },
+      { platform: 'Pinterest', account_name: 'HomyLife Board', account_url: 'https://pinterest.com/homylife', followers: 18700, posts_count: 310, status: 'paused', note: '暂停更新，保留外链' },
+    ])
+    await insertRows('brand_influencers', [
+      { name: 'Emily Home', platform: 'YouTube', handle: '@emilyhome', followers: 320000, niche: '家居收纳', country: 'US', contact_email: 'emily@example.com', price_cny: 18000, status: 'active', last_collab_at: daysAgo(12), note: '已寄样 2 款' },
+      { name: 'Sofia Lives', platform: 'Instagram', handle: '@sofialives', followers: 168000, niche: '软装搭配', country: 'US', contact_wechat: 'sofia_lives', price_cny: 9500, status: 'negotiating', note: '报价待确认' },
+      { name: 'Mike Unboxes', platform: 'TikTok', handle: '@mikeunboxes', followers: 89000, niche: '开箱测评', country: 'UK', contact_email: 'mike@example.com', price_cny: 6200, status: 'done', last_collab_at: daysAgo(36) },
+      { name: '田园小美', platform: 'TikTok', handle: '@tianyuanxm', followers: 54000, niche: '厨房好物', country: 'CN', contact_wechat: 'tianyuan_xm', price_cny: 3800, status: 'contacting' },
+    ])
+    await insertRows('brand_pr_contacts', [
+      { media_name: 'Home Living Weekly', channel_type: 'media', contact_name: 'Anna Lee', contact_email: 'anna@homeliving.example', coverage_count: 3, last_coverage_at: daysAgo(20), status: 'active', note: '季度家居专题' },
+      { media_name: 'The Pretty House Blog', channel_type: 'blog', contact_name: 'Claire', contact_email: 'claire@prettyhouse.example', coverage_count: 5, last_coverage_at: daysAgo(8), status: 'active' },
+      { media_name: 'Reddit r/HomeDecor', channel_type: 'forum', contact_name: '社区运营', coverage_count: 2, last_coverage_at: daysAgo(31), status: 'paused', note: '仅做自然互动，不投硬广' },
+    ])
+    const metricRows = []
+    for (let i = 13; i >= 0; i--) {
+      const wave = 1 + 0.18 * Math.sin(i / 2.2)
+      metricRows.push({
+        metric_date: daysAgo(i),
+        channel: 'overall',
+        impressions: Math.round(18500 * wave + i * 120),
+        search_volume: Math.round(3200 * wave + i * 26),
+        site_visits: Math.round(960 * wave + i * 9),
+        backlinks: 2 + (i % 3),
+        note: '自动演示数据',
+      })
+    }
+    await insertRows('brand_metrics', metricRows)
+  } catch {
+    // 旧库还没有品牌营销四张表：跳过演示数据
+  }
+
   // 10. 采购：4 家供应商 + 5 张采购单（含部分到货 / 逾期未到各一张）
   try {
     const supplierRows = await insertRows<{ id: string }>(

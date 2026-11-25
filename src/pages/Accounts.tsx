@@ -75,6 +75,10 @@ const RESOURCE_TABLES: Array<{ table: string; label: string }> = [
 interface OrgForm {
   id: string
   name: string
+  email: string
+  employee_no: string
+  phone: string
+  wechat: string
   department_id: string
   position_id: string
   role_id: string
@@ -84,6 +88,9 @@ interface OrgForm {
 interface CreateForm {
   full_name: string
   email: string
+  employee_no: string
+  phone: string
+  wechat: string
   password: string
   showPassword: boolean
   department_id: string
@@ -100,6 +107,9 @@ function emptyCreateForm(role: Role): CreateForm {
   return {
     full_name: '',
     email: '',
+    employee_no: '',
+    phone: '',
+    wechat: '',
     password: randomPassword(),
     showPassword: true,
     department_id: '',
@@ -175,6 +185,9 @@ export default function Accounts() {
       return (
         (p.email ?? '').toLowerCase().includes(q) ||
         (p.full_name ?? '').toLowerCase().includes(q) ||
+        (p.employee_no ?? '').toLowerCase().includes(q) ||
+        (p.phone ?? '').toLowerCase().includes(q) ||
+        (p.wechat ?? '').toLowerCase().includes(q) ||
         dept.includes(q) ||
         pos.includes(q)
       )
@@ -287,6 +300,10 @@ export default function Accounts() {
     setOrgForm({
       id: target.id,
       name: target.full_name || target.email || '未命名',
+      email: target.email ?? '',
+      employee_no: target.employee_no ?? '',
+      phone: target.phone ?? '',
+      wechat: target.wechat ?? '',
       department_id: target.department_id ?? '',
       position_id: target.position_id ?? '',
       role_id: target.role_id ?? '',
@@ -296,9 +313,20 @@ export default function Accounts() {
 
   async function saveOrg() {
     if (!orgForm) return
+    const no = orgForm.employee_no.trim()
+    if (
+      no &&
+      list.some(
+        (p) => p.id !== orgForm.id && (p.employee_no ?? '').trim().toLowerCase() === no.toLowerCase(),
+      )
+    )
+      return push('该工号已被其他成员使用', 'error')
     setOrgSaving(true)
     try {
       const payload: Record<string, unknown> = {
+        employee_no: no || null,
+        phone: orgForm.phone.trim() || null,
+        wechat: orgForm.wechat.trim() || null,
         department_id: orgForm.department_id || null,
         position_id: orgForm.position_id || null,
         note: orgForm.note.trim() || null,
@@ -306,7 +334,7 @@ export default function Accounts() {
       // 岗位角色决定业务权限，只有管理员能改；HR 调岗只动部门与岗位
       if (canAdmin) payload.role_id = orgForm.role_id || null
       await updateRow<Profile>('profiles', orgForm.id, payload)
-      push(canAdmin ? '组织信息已更新' : '部门与岗位已更新')
+      push(canAdmin ? '员工档案已更新' : '部门、岗位与联系方式已更新')
       setOrgForm(null)
       reload()
     } catch (err) {
@@ -330,6 +358,9 @@ export default function Accounts() {
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(form.email.trim())) return push('邮箱格式不正确', 'error')
     const pw = checkPassword(form.password)
     if (!pw.ok) return push(`初始密码不达标：${pw.hint}`, 'error')
+    const no = form.employee_no.trim()
+    if (no && list.some((p) => (p.employee_no ?? '').trim().toLowerCase() === no.toLowerCase()))
+      return push('该工号已被其他成员使用', 'error')
 
     setCreateLoading(true)
     let userId: string
@@ -349,6 +380,9 @@ export default function Accounts() {
     try {
       await updateRow<Profile>('profiles', userId, {
         full_name: form.full_name.trim(),
+        employee_no: no || null,
+        phone: form.phone.trim() || null,
+        wechat: form.wechat.trim() || null,
         role: form.role,
         status: form.pending ? 'disabled' : 'active',
         employment_status: form.pending ? 'pending' : 'active',
@@ -558,7 +592,7 @@ export default function Accounts() {
             <table className="w-full text-[12.5px]">
               <thead>
                 <tr className="bg-ink-50/70 text-ink-500">
-                  <th className="text-left font-medium px-4 py-2.5">成员</th>
+                  <th className="text-left font-medium px-4 py-2.5">成员 / 工号 / 联系方式</th>
                   <th className="text-left font-medium px-4 py-2.5 w-[150px]">系统角色 / 岗位角色</th>
                   <th className="text-left font-medium px-4 py-2.5 w-[104px]">人事状态</th>
                   <th className="text-left font-medium px-4 py-2.5 w-[136px]">最近登录</th>
@@ -593,6 +627,11 @@ export default function Accounts() {
                               <span className={cn('font-medium truncate', left || disabled ? 'text-ink-400' : 'text-ink-900')}>
                                 {p.full_name || '未命名'}
                               </span>
+                              {p.employee_no && (
+                                <span className="shrink-0 rounded border border-ink-200 bg-ink-50 px-1 py-px text-[10px] text-ink-500 num">
+                                  {p.employee_no}
+                                </span>
+                              )}
                               {mine && (
                                 <span className="shrink-0 rounded border border-brand-200 bg-brand-50 px-1 py-px text-[10px] text-brand-700">
                                   你
@@ -605,6 +644,13 @@ export default function Accounts() {
                               {pos && ` · ${pos.name}`}
                               {left && p.handover_to && ` · 已移交 ${list.find((x) => x.id === p.handover_to)?.full_name ?? ''}`}
                             </p>
+                            {(p.phone || p.wechat) && (
+                              <p className="text-[10.5px] text-ink-400 truncate">
+                                {[p.phone ? `电话 ${p.phone}` : '', p.wechat ? `微信 ${p.wechat}` : '']
+                                  .filter(Boolean)
+                                  .join(' · ')}
+                              </p>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -848,6 +894,30 @@ export default function Accounts() {
                   onChange={(e) => setCreateForm({ ...createForm, email: e.target.value })}
                 />
               </Field>
+              <Field label="员工工号" hint="全公司唯一，可留空">
+                <input
+                  className="input num"
+                  value={createForm.employee_no}
+                  placeholder="如 E1024"
+                  onChange={(e) => setCreateForm({ ...createForm, employee_no: e.target.value })}
+                />
+              </Field>
+              <Field label="联系电话">
+                <input
+                  className="input"
+                  value={createForm.phone}
+                  placeholder="138…"
+                  onChange={(e) => setCreateForm({ ...createForm, phone: e.target.value })}
+                />
+              </Field>
+              <Field label="微信">
+                <input
+                  className="input"
+                  value={createForm.wechat}
+                  placeholder="微信号"
+                  onChange={(e) => setCreateForm({ ...createForm, wechat: e.target.value })}
+                />
+              </Field>
             </div>
 
             <Field label="初始密码" required hint={createPwCheck.hint}>
@@ -974,8 +1044,8 @@ export default function Accounts() {
       <Modal
         open={!!orgForm}
         onClose={() => setOrgForm(null)}
-        title="调整组织信息"
-        description={orgForm ? `成员：${orgForm.name}` : undefined}
+        title="编辑员工档案"
+        description={orgForm ? `成员：${orgForm.name} · 工号 / 职位 / 部门 / 联系方式` : undefined}
         footer={
           <>
             <Button onClick={() => setOrgForm(null)}>取消</Button>
@@ -1003,6 +1073,37 @@ export default function Accounts() {
                   options={posOptions}
                   placeholder="未分配"
                 />
+              </Field>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="员工工号" hint="全公司唯一，可留空">
+                <input
+                  className="input num"
+                  value={orgForm.employee_no}
+                  placeholder="如 E1024"
+                  onChange={(e) => setOrgForm({ ...orgForm, employee_no: e.target.value })}
+                />
+              </Field>
+              <Field label="联系电话">
+                <input
+                  className="input"
+                  value={orgForm.phone}
+                  placeholder="138…"
+                  onChange={(e) => setOrgForm({ ...orgForm, phone: e.target.value })}
+                />
+              </Field>
+              <Field label="微信">
+                <input
+                  className="input"
+                  value={orgForm.wechat}
+                  placeholder="微信号"
+                  onChange={(e) => setOrgForm({ ...orgForm, wechat: e.target.value })}
+                />
+              </Field>
+              <Field label="邮箱" hint="登录邮箱，在认证服务中维护">
+                <p className="text-[12px] text-ink-500 h-9 flex items-center truncate">
+                  {orgForm.email || '—'}
+                </p>
               </Field>
             </div>
             <Field

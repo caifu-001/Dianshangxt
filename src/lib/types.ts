@@ -25,6 +25,10 @@ export interface Profile {
   handover_to?: string | null
   provisioned_by?: string | null
   provisioned_at?: string | null
+  /** 员工工号 / 电话 / 微信（旧库可能没有这三列） */
+  employee_no?: string | null
+  phone?: string | null
+  wechat?: string | null
 }
 
 /* ---------------- 权限流程 ---------------- */
@@ -511,4 +515,76 @@ export interface PurchaseItem {
   /** 数据库生成列：quantity * unit_price */
   amount: number
   created_at: string
+}
+
+/* ---------------- 站外品牌营销 ---------------- */
+
+/** 社媒营销账号 */
+export interface BrandSocialAccount {
+  id: string
+  user_id: string
+  platform: string
+  account_name: string
+  account_url: string | null
+  followers: number
+  posts_count: number
+  owner_id: string | null
+  status: 'active' | 'paused'
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 站外红人 */
+export interface BrandInfluencer {
+  id: string
+  user_id: string
+  name: string
+  platform: string
+  handle: string | null
+  followers: number
+  niche: string | null
+  country: string | null
+  contact_email: string | null
+  contact_wechat: string | null
+  price_cny: number
+  status: 'contacting' | 'negotiating' | 'active' | 'done' | 'paused'
+  last_collab_at: string | null
+  owner_id: string | null
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 公共关系 / 媒体资源 */
+export interface BrandPrContact {
+  id: string
+  user_id: string
+  media_name: string
+  contact_name: string | null
+  channel_type: string
+  contact_email: string | null
+  contact_phone: string | null
+  coverage_count: number
+  last_coverage_at: string | null
+  status: 'active' | 'paused'
+  owner_id: string | null
+  note: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** 品牌曝光 / 搜索量指标（按日 + 渠道唯一） */
+export interface BrandMetric {
+  id: string
+  user_id: string
+  metric_date: string
+  channel: string
+  impressions: number
+  search_volume: number
+  site_visits: number
+  backlinks: number
+  note: string | null
+  created_at: string
+  updated_at: string
 }

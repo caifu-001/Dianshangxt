@@ -65,6 +65,7 @@ export type PermissionCode =
   | 'ads.view' | 'ads.edit'
   | 'creators.view' | 'creators.edit'
   | 'competitors.view' | 'competitors.edit'
+  | 'brand.view' | 'brand.edit'
   | 'profit.view' | 'profit.edit'
   | 'tasks.view' | 'tasks.edit'
   | 'performance.view' | 'performance.edit'
@@ -94,6 +95,7 @@ export const MODULES: ModuleDef[] = [
   { key: 'ads', label: '广告投放', desc: '广告活动与 ACOS', view: 'ads.view', edit: 'ads.edit', group: '增长' },
   { key: 'creators', label: '达人合作', desc: 'TikTok 达人建联与内容', view: 'creators.view', edit: 'creators.edit', group: '增长' },
   { key: 'competitors', label: '竞品分析', desc: '竞品价格、评分与排名监控', view: 'competitors.view', edit: 'competitors.edit', group: '增长' },
+  { key: 'brand', label: '站外品牌营销', desc: '社媒营销、站外红人、公共关系与曝光搜索', view: 'brand.view', edit: 'brand.edit', group: '增长' },
   { key: 'tasks', label: '任务看板', desc: '运营任务与协作', view: 'tasks.view', edit: 'tasks.edit', group: '协同' },
   { key: 'performance', label: '绩效管理', desc: '考核周期、评分与评语', view: 'performance.view', edit: 'performance.edit', group: '人事' },
 ]
@@ -166,8 +168,8 @@ export const DEPT_TEMPLATES: DeptTemplate[] = [
     key: 'content',
     name: '内容营销部',
     code: 'CONTENT',
-    desc: '达人建联、内容合作与任务协作',
-    scope: [...moduleScope(['creators', 'tasks']), 'products.view', 'performance.view'],
+    desc: '达人建联、站外品牌营销与内容合作',
+    scope: [...moduleScope(['creators', 'brand', 'tasks']), 'products.view', 'performance.view'],
   },
   {
     key: 'fin',

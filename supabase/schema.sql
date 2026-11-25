@@ -339,6 +339,14 @@ create index if not exists idx_profiles_department on public.profiles(department
 create index if not exists idx_profiles_position   on public.profiles(position_id);
 create index if not exists idx_profiles_role_id    on public.profiles(role_id);
 
+-- 员工档案联系方式：工号 / 电话 / 微信（登录邮箱在 profiles.email，不随这里改动）
+alter table public.profiles add column if not exists employee_no text;
+alter table public.profiles add column if not exists phone       text;
+alter table public.profiles add column if not exists wechat      text;
+create unique index if not exists uq_profiles_employee_no
+  on public.profiles(lower(employee_no))
+ where employee_no is not null and btrim(employee_no) <> '';
+
 -- -------------------------------------------------------------
 -- 10.1 人员生命周期（入职 / 在职 / 离职）
 --      status 管「账号能不能登录」，employment_status 管「人还在这家公司吗」，
@@ -413,6 +421,86 @@ create table if not exists public.competitor_snapshots (
 );
 create index if not exists idx_comp_snap_competitor
   on public.competitor_snapshots(competitor_id, snapshot_date desc);
+
+-- -------------------------------------------------------------
+-- 11.5 站外品牌营销：社媒账号 / 站外红人 / 公共关系 / 曝光搜索量
+--      统一用 brand.view / brand.edit 权限，负责人 owner_id 参与离职移交
+-- -------------------------------------------------------------
+create table if not exists public.brand_social_accounts (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  platform     text not null,                            -- YouTube / Instagram / TikTok / X ...
+  account_name text not null,
+  account_url  text,
+  followers    integer not null default 0 check (followers >= 0),
+  posts_count  integer not null default 0 check (posts_count >= 0),
+  owner_id     uuid references public.profiles(id) on delete set null,
+  status       text not null default 'active' check (status in ('active', 'paused')),
+  note         text,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+create unique index if not exists uq_brand_social_account
+  on public.brand_social_accounts(lower(platform), lower(account_name));
+create index if not exists idx_brand_social_owner on public.brand_social_accounts(owner_id);
+
+create table if not exists public.brand_influencers (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  name           text not null,
+  platform       text not null,
+  handle         text,
+  followers      integer not null default 0 check (followers >= 0),
+  niche          text,
+  country        text,
+  contact_email  text,
+  contact_wechat text,
+  price_cny      numeric(12,2) not null default 0 check (price_cny >= 0),
+  status         text not null default 'contacting'
+                 check (status in ('contacting', 'negotiating', 'active', 'done', 'paused')),
+  last_collab_at date,
+  owner_id       uuid references public.profiles(id) on delete set null,
+  note           text,
+  created_at     timestamptz not null default now(),
+  updated_at     timestamptz not null default now()
+);
+create index if not exists idx_brand_influencer_owner on public.brand_influencers(owner_id);
+create index if not exists idx_brand_influencer_status on public.brand_influencers(status);
+
+create table if not exists public.brand_pr_contacts (
+  id               uuid primary key default gen_random_uuid(),
+  user_id          uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  media_name       text not null,
+  contact_name     text,
+  channel_type     text not null default 'media',          -- media / blog / forum / agency
+  contact_email    text,
+  contact_phone    text,
+  coverage_count   integer not null default 0 check (coverage_count >= 0),
+  last_coverage_at date,
+  status           text not null default 'active' check (status in ('active', 'paused')),
+  owner_id         uuid references public.profiles(id) on delete set null,
+  note             text,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now()
+);
+create index if not exists idx_brand_pr_owner on public.brand_pr_contacts(owner_id);
+
+create table if not exists public.brand_metrics (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  metric_date   date not null default current_date,
+  channel       text not null default 'overall',          -- overall / google / social / pr
+  impressions   integer not null default 0 check (impressions >= 0),
+  search_volume integer not null default 0 check (search_volume >= 0),
+  site_visits   integer not null default 0 check (site_visits >= 0),
+  backlinks     integer not null default 0 check (backlinks >= 0),
+  note          text,
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
+create unique index if not exists uq_brand_metrics_date_channel
+  on public.brand_metrics(metric_date, lower(channel));
+create index if not exists idx_brand_metrics_date on public.brand_metrics(metric_date desc);
 
 -- -------------------------------------------------------------
 -- 12. 采购：供应商 / 采购单 / 采购明细
@@ -860,7 +948,8 @@ declare
     'campaigns','creators','tasks','expenses',
     'competitors','competitor_snapshots','suppliers','purchase_orders','purchase_items',
     'departments','positions','roles','access_requests','employee_events',
-    'performance_reviews','stock_movements','purchase_payments'
+    'performance_reviews','stock_movements','purchase_payments',
+    'brand_social_accounts','brand_influencers','brand_pr_contacts','brand_metrics'
   ];
 begin
   foreach t in array tabs loop
@@ -932,7 +1021,11 @@ begin
       ('expenses',  'profit'),
       ('competitors','competitors'),
       ('suppliers', 'purchase'),
-      ('purchase_orders', 'purchase')
+      ('purchase_orders', 'purchase'),
+      ('brand_social_accounts', 'brand'),
+      ('brand_influencers', 'brand'),
+      ('brand_pr_contacts', 'brand'),
+      ('brand_metrics', 'brand')
     ) as v(tbl, perm)
   loop
     -- 清理历史策略（旧版为 xxx_owner_all，按 user_id 隔离）
@@ -1201,7 +1294,8 @@ declare
   to_name text;
   tabs  text[] := array[
     'stores','products','orders','inventory','campaigns','creators','tasks','expenses',
-    'competitors','competitor_snapshots','suppliers','supplier_products','purchase_orders','purchase_items'
+    'competitors','competitor_snapshots','suppliers','supplier_products','purchase_orders','purchase_items',
+    'brand_social_accounts','brand_influencers','brand_pr_contacts'
   ];
 begin
   if not (public.is_staff() or public.has_permission('hr.manage')) then
@@ -2171,6 +2265,8 @@ grant select, insert, update, delete on
   public.competitors, public.competitor_snapshots,
   public.suppliers, public.supplier_products, public.supplier_contacts,
   public.purchase_orders, public.purchase_items,
+  public.brand_social_accounts, public.brand_influencers,
+  public.brand_pr_contacts, public.brand_metrics,
   public.departments, public.positions, public.roles,
   public.access_requests, public.employee_events, public.performance_reviews,
   public.stock_movements, public.purchase_payments
@@ -2213,7 +2309,8 @@ from (values
          'purchase.view','purchase.edit','profit.view','profit.edit',
          'ads.view','ads.edit','creators.view','creators.edit',
          'competitors.view','competitors.edit','tasks.view','tasks.edit',
-         'performance.view','performance.edit','hr.view']::text[]),
+         'performance.view','performance.edit','hr.view',
+         'brand.view','brand.edit']::text[]),
   ('人力资源部', 'HR',      '招聘入离职、花名册与绩效管理',      1,
    array['hr.view','hr.manage',
          'performance.view','performance.edit','tasks.view','tasks.edit']::text[]),
@@ -2227,7 +2324,8 @@ from (values
          'products.view','tasks.view','performance.view']::text[]),
   ('内容营销部', 'CONTENT', '达人合作、短视频与直播',            4,
    array['creators.view','creators.edit','products.view',
-         'tasks.view','tasks.edit','performance.view']::text[]),
+         'tasks.view','tasks.edit','performance.view',
+         'brand.view','brand.edit']::text[]),
   ('财务部',     'FIN',     '利润核算、费用与税务',              5,
    array['profit.view','profit.edit','orders.view','purchase.view',
          'products.view','stores.view','performance.view']::text[])
@@ -2253,7 +2351,8 @@ update public.departments d
                           'purchase.view','purchase.edit','profit.view','profit.edit',
                           'ads.view','ads.edit','creators.view','creators.edit',
                           'competitors.view','competitors.edit','tasks.view','tasks.edit',
-                          'performance.view','performance.edit','hr.view']::text[]),
+                          'performance.view','performance.edit','hr.view',
+         'brand.view','brand.edit']::text[]),
     ('人力资源部', array['hr.view','hr.manage',
                           'performance.view','performance.edit','tasks.view','tasks.edit']::text[]),
     ('运营部',     array['stores.view','stores.edit','products.view','products.edit',
@@ -2263,7 +2362,8 @@ update public.departments d
     ('广告投放部', array['ads.view','ads.edit','competitors.view','competitors.edit',
                           'products.view','tasks.view','performance.view']::text[]),
     ('内容营销部', array['creators.view','creators.edit','products.view',
-                          'tasks.view','tasks.edit','performance.view']::text[]),
+                          'tasks.view','tasks.edit','performance.view',
+         'brand.view','brand.edit']::text[]),
     ('财务部',     array['profit.view','profit.edit','orders.view','purchase.view',
                           'products.view','stores.view','performance.view']::text[])
   ) as v(name, scope)
@@ -2290,13 +2390,14 @@ from (values
          'tasks.view','tasks.edit']::text[], 1),
   ('广告投手', '广告活动与商品数据，不接触订单与财务',
    array['ads.view','ads.edit','products.view','tasks.view']::text[], 2),
-  ('内容达人', '达人建联与内容合作，可查看到商品与任务',
-   array['creators.view','creators.edit','products.view','tasks.view','tasks.edit']::text[], 3),
+  ('内容达人', '达人建联、站外品牌营销与内容合作',
+   array['creators.view','creators.edit','products.view','tasks.view','tasks.edit',
+         'brand.view','brand.edit']::text[], 3),
   ('财务核算', '订单与利润只读，可维护费用台账，不能改动业务单据',
    array['profit.view','profit.edit','orders.view','stores.view','products.view']::text[], 4),
   ('只读观察员', '全部业务模块只读，适合老板或外部顾问',
    array['stores.view','products.view','orders.view','inventory.view',
-         'ads.view','creators.view','profit.view','tasks.view']::text[], 5)
+         'ads.view','creators.view','profit.view','tasks.view','brand.view']::text[], 5)
 ) as v(name, description, permissions, sort_order)
 where not exists (select 1 from public.roles);
 
@@ -2324,7 +2425,9 @@ begin
       ('财务核算',   'purchase.view'),
       ('只读观察员', 'competitors.view'), ('只读观察员', 'purchase.view'),
       ('运营专员',   'performance.view'), ('财务核算', 'performance.view'),
-      ('只读观察员', 'performance.view')
+      ('只读观察员', 'performance.view'),
+      ('内容达人',   'brand.view'), ('内容达人',   'brand.edit'),
+      ('只读观察员', 'brand.view')
     ) as v(role_name, code)
   loop
     update public.roles
@@ -2332,6 +2435,19 @@ begin
      where name = rec.role_name
        and is_system
        and not (rec.code = any(permissions));
+  end loop;
+
+  -- 老库部门范围补齐：信息中心与内容营销部自动获得站外品牌营销权限
+  for rec in
+    select * from (values
+      ('信息中心',   'brand.view'), ('信息中心',   'brand.edit'),
+      ('内容营销部', 'brand.view'), ('内容营销部', 'brand.edit')
+    ) as v(dept_name, code)
+  loop
+    update public.departments
+       set scope = array_append(scope, rec.code)
+     where name = rec.dept_name
+       and not (rec.code = any(scope));
   end loop;
 end;
 $do$;

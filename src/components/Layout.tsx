@@ -8,6 +8,7 @@ import {
   CheckSquare,
   Database,
   Factory,
+  Globe2,
   KeyRound,
   LayoutDashboard,
   LogOut,
@@ -72,6 +73,7 @@ const NAV_GROUPS: Array<{
       { to: '/ads', label: '广告投放', icon: Megaphone, perm: 'ads.view' },
       { to: '/creators', label: '达人合作', icon: Users, badge: 'TikTok', perm: 'creators.view' },
       { to: '/competitors', label: '竞品分析', icon: Telescope, perm: 'competitors.view' },
+      { to: '/brand', label: '站外品牌营销', icon: Globe2, perm: 'brand.view' },
     ],
   },
   {
