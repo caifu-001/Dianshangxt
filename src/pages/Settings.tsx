@@ -22,7 +22,8 @@ import { PROJECT_REF, SQL_EDITOR_URL, SUPABASE_URL } from '../lib/supabase'
 import { seedDemoData } from '../lib/seed'
 import { FX_DEFAULTS, FX_EDITABLE, resolveRates } from '../lib/fx'
 import { Badge, Button, ConfirmDialog, Field, PageHeader, useToast } from '../components/ui'
-import { downloadTextFile, fmtDateTime } from '../lib/utils'
+import { PASSWORD_TONE_CLASS, checkPassword } from '../lib/password'
+import { cn, downloadTextFile, fmtDateTime } from '../lib/utils'
 import type { Profile } from '../lib/types'
 
 const CLEAR_ORDER = ['orders', 'inventory', 'campaigns', 'creators', 'expenses', 'tasks', 'products', 'stores']
@@ -39,7 +40,7 @@ const COUNTS: Array<{ table: string; label: string }> = [
 ]
 
 export default function Settings() {
-  const { user, profile, refreshProfile, schemaReady } = useAuth()
+  const { user, profile, refreshProfile, schemaReady, changePassword } = useAuth()
   const { push } = useToast()
   const [fullName, setFullName] = useState('')
   const [company, setCompany] = useState('')
@@ -51,6 +52,12 @@ export default function Settings() {
   const [clearOpen, setClearOpen] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [counts, setCounts] = useState<Record<string, number>>({})
+  const [curPw, setCurPw] = useState('')
+  const [newPw, setNewPw] = useState('')
+  const [confirmPw, setConfirmPw] = useState('')
+  const [savingPw, setSavingPw] = useState(false)
+
+  const newPwCheck = checkPassword(newPw)
 
   useEffect(() => {
     setFullName(profile?.full_name ?? '')
@@ -98,6 +105,37 @@ export default function Settings() {
       push(err instanceof Error ? err.message : '保存失败', 'error')
     } finally {
       setSavingProfile(false)
+    }
+  }
+
+  async function handleChangePassword() {
+    if (!curPw) {
+      push('请先填写当前密码', 'error')
+      return
+    }
+    if (newPw !== confirmPw) {
+      push('两次输入的新密码不一致', 'error')
+      return
+    }
+    if (!newPwCheck.ok) {
+      push(newPwCheck.hint, 'error')
+      return
+    }
+    if (newPw === curPw) {
+      push('新密码不能与当前密码相同', 'error')
+      return
+    }
+    setSavingPw(true)
+    try {
+      await changePassword(curPw, newPw)
+      setCurPw('')
+      setNewPw('')
+      setConfirmPw('')
+      push('密码已更新，下次登录请使用新密码')
+    } catch (err) {
+      push(err instanceof Error ? err.message : '修改失败', 'error')
+    } finally {
+      setSavingPw(false)
     }
   }
 
@@ -191,6 +229,74 @@ export default function Settings() {
               保存资料
             </Button>
             <span className="text-[11px] text-ink-400">称呼会显示在左侧边栏与任务负责人推荐中</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card mt-3 overflow-hidden">
+        <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
+          <ShieldCheck className="w-4 h-4 text-ink-400" />
+          <h3 className="text-[13.5px] font-semibold text-ink-900">账号安全</h3>
+          <span className="text-[11px] text-ink-400">改密需先验证当前密码，防止会话被盗后直接接管账号</span>
+        </div>
+        <div className="p-4 grid sm:grid-cols-3 gap-3">
+          <Field label="当前密码">
+            <input
+              className="input"
+              type="password"
+              value={curPw}
+              onChange={(e) => setCurPw(e.target.value)}
+              placeholder="••••••••"
+              autoComplete="current-password"
+            />
+          </Field>
+          <Field label="新密码">
+            <input
+              className="input"
+              type="password"
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+              placeholder="至少 8 位"
+              autoComplete="new-password"
+            />
+          </Field>
+          <Field label="确认新密码">
+            <input
+              className="input"
+              type="password"
+              value={confirmPw}
+              onChange={(e) => setConfirmPw(e.target.value)}
+              placeholder="再输一次"
+              autoComplete="new-password"
+            />
+          </Field>
+
+          {newPw.length > 0 && (
+            <div className="sm:col-span-3">
+              <div className="flex gap-1 max-w-[240px]">
+                {[1, 2, 3, 4].map((i) => (
+                  <span
+                    key={i}
+                    className={cn(
+                      'h-1 flex-1 rounded-full transition-colors',
+                      i <= newPwCheck.score ? PASSWORD_TONE_CLASS[newPwCheck.tone] : 'bg-ink-200',
+                    )}
+                  />
+                ))}
+              </div>
+              <p className={cn('mt-1 text-[11px]', newPwCheck.ok ? 'text-ink-400' : 'text-rose-600')}>
+                {newPwCheck.label ? `${newPwCheck.label} · ${newPwCheck.hint}` : newPwCheck.hint}
+              </p>
+            </div>
+          )}
+
+          <div className="sm:col-span-3 flex flex-wrap items-center gap-2">
+            <Button variant="primary" size="sm" onClick={handleChangePassword} loading={savingPw}>
+              更新密码
+            </Button>
+            <span className="text-[11px] text-ink-400">
+              登录已启用图形验证码；密码连续输错 5 次锁定 15 分钟；也可切换为邮箱验证码登录
+            </span>
           </div>
         </div>
       </div>

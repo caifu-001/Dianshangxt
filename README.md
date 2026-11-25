@@ -60,6 +60,42 @@ npm run dev      # http://127.0.0.1:5173
 > 内部工具若不想验证，可到 Supabase 控制台 → Authentication → Sign In / Providers → Email，
 > 关闭 **Confirm email** 后重新注册即可（已有账号需要再确认一次邮箱）。
 
+## 账号安全
+
+代码里已经内置的防护：
+
+| 机制 | 说明 |
+| --- | --- |
+| 图形验证码 | Canvas 绘制 4 位字符（排除 0/O/1/I/L），点击换一张，校验失败自动刷新，登录/注册/发码前都需通过 |
+| 密码强度 | 至少 8 位，且包含「小写 / 大写 / 数字 / 符号」中的两类，注册与改密时实时提示 |
+| 失败锁定 | 同一邮箱连续输错 5 次，锁定 15 分钟并显示倒计时 |
+| 邮箱验证码登录 | 一次性 6 位码，60 秒重发冷却，10 分钟有效，无需记密码 |
+| 改密验证 | 修改密码前必须重新输入当前密码，避免会话被盗后直接接管账号 |
+| 数据隔离 | 9 张业务表全部启用 RLS，`user_id = auth.uid()`，账号之间互相不可见 |
+
+### 邮箱验证码要真正可用，需在 Supabase 做三步
+
+**1. 配置自有 SMTP（必须）**
+`Authentication` → `Emails` → `SMTP Settings`。
+Supabase 内置邮件服务**每小时仅 2 封，且只能发给项目成员**，验证码基本发不出去。
+推荐 Resend（免费 100 封/天）、SendGrid 或企业邮箱 SMTP。
+
+**2. 让邮件显示 6 位数字（可选）**
+`Authentication` → `Emails` → `Magic Link`，把正文里的 `{{ .ConfirmationURL }}` 换成 `{{ .Token }}`。
+不换也能用 —— 邮件里是一条登录链接，用户点它同样能完成登录。
+
+**3. 加 Redirect URL 白名单**
+`Authentication` → `URL Configuration` → `Redirect URLs`，加入：
+
+```
+https://caifu-001.github.io/Dianshangxt/
+http://127.0.0.1:5173/
+```
+
+> **失败锁定的边界**：前端锁定基于 `localStorage`，清缓存即可绕过，它拦的是"同一浏览器随手试密码"这类最廉价的手段。
+> 服务端真正的防线是 Supabase Auth 自带的 rate limit。生产环境建议同时在
+> `Authentication` → `Providers` → `Email` 里开启「Confirm email」并要求强密码。
+
 ## 多币种与汇率
 
 Amazon 各站点币种不同（USD / GBP / EUR / JPY…），系统统一以 **USD 为基准**折算后再汇总：
