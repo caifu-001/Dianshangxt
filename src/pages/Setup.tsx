@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AlertTriangle, Check, CheckCircle2, Copy, Database, ExternalLink, Loader2, Sparkles } from 'lucide-react'
+import { AlertTriangle, Check, CheckCircle2, Copy, Database, ExternalLink, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 import schemaSql from '../../supabase/schema.sql?raw'
 import { useAuth } from '../context/AuthContext'
 import { SQL_EDITOR_URL, SUPABASE_URL } from '../lib/supabase'
@@ -10,26 +10,32 @@ import { checkSchema } from '../lib/db'
 const STEPS = [
   { title: '打开 SQL 编辑器', desc: '登录 Supabase 控制台，进入本项目的 SQL Editor' },
   { title: '粘贴并执行脚本', desc: '建表、索引、行级权限（RLS）与注册触发器一次装好' },
-  { title: '回到这里重新检测', desc: '检测通过即可建立店铺、录入商品与订单' },
+  { title: '刷新缓存并检测', desc: '执行缓存刷新语句，回到这里重新检测即可使用' },
 ]
+
+const RELOAD_SQL = 'NOTIFY pgrst, \'reload schema\';'
 
 export default function Setup() {
   const { schemaReady, schemaMessage, recheckSchema } = useAuth()
   const { push } = useToast()
   const [copied, setCopied] = useState(false)
+  const [reloadCopied, setReloadCopied] = useState(false)
   const [checking, setChecking] = useState(false)
   const [seeding, setSeeding] = useState(false)
 
-  async function copySql() {
+  async function copyText(text: string, onDone: () => void, message: string) {
     try {
-      await navigator.clipboard.writeText(schemaSql)
-      setCopied(true)
-      push('SQL 脚本已复制到剪贴板')
-      setTimeout(() => setCopied(false), 2200)
+      await navigator.clipboard.writeText(text)
+      onDone()
+      push(message)
+      setTimeout(() => onDone(), 2200)
     } catch {
-      push('复制失败，请手动全选下方代码', 'error')
+      push('复制失败，请手动选中文本复制', 'error')
     }
   }
+
+  const copySql = () => copyText(schemaSql, () => setCopied((v) => !v), 'SQL 脚本已复制到剪贴板')
+  const copyReloadSql = () => copyText(RELOAD_SQL, () => setReloadCopied((v) => !v), '缓存刷新语句已复制')
 
   async function handleRecheck() {
     setChecking(true)
@@ -124,6 +130,26 @@ export default function Setup() {
         <pre className="max-h-[320px] overflow-auto bg-ink-900 text-[11.5px] leading-relaxed text-ink-100 p-4 font-mono scrollbar-thin">
           {schemaSql}
         </pre>
+      </div>
+
+      {/* 执行 DDL 后 PostgREST 的 schema 缓存可能滞后，新表明明建好了却报「表不存在」。
+          给出一键复制的刷新语句，避免用户误以为脚本没执行成功而反复重跑。 */}
+      <div className="card mt-4 p-4 flex items-start gap-3 border-sky-200 bg-sky-50/40">
+        <RefreshCw className="w-4 h-4 text-sky-600 mt-0.5 shrink-0" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[13px] font-medium text-ink-900">执行完脚本后如果提示「数据表还没创建」</p>
+          <p className="mt-1 text-[11.5px] text-ink-600 leading-relaxed">
+            这通常不是脚本没执行，而是接口缓存还没刷新。在 SQL Editor 再执行下面这句，然后回到本页点「重新检测」即可：
+          </p>
+          <div className="mt-2 flex items-center gap-2">
+            <code className="flex-1 min-w-0 truncate rounded-md bg-white border border-ink-200 px-2.5 py-1.5 text-[11.5px] font-mono text-ink-800">
+              {RELOAD_SQL}
+            </code>
+            <Button size="sm" icon={reloadCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} onClick={copyReloadSql}>
+              {reloadCopied ? '已复制' : '复制'}
+            </Button>
+          </div>
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mt-4">
