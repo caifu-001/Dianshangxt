@@ -147,6 +147,24 @@ export async function callRpc<T = unknown>(fn: string, args: Record<string, unkn
   return data as T
 }
 
+/**
+ * 调用 Supabase Edge Function（带当前用户登录态）。
+ * 敏感逻辑（OAuth 换 token / SP-API 签名）都在服务端，前端只传业务参数。
+ */
+export async function invokeFunction<T = unknown>(
+  name: string,
+  body: Record<string, unknown> = {},
+): Promise<T> {
+  const { data, error } = await db().functions.invoke(name, { body })
+  if (error) {
+    const msg = error.message || ''
+    // 未配置凭证是预期状态，不记入错误日志噪音
+    if (/NOT_CONFIGURED|尚未配置/.test(msg)) throw new Error(msg)
+    throw new Error(translateDbError(msg))
+  }
+  return data as T
+}
+
 /** 检测数据库是否已执行初始化脚本 */
 export async function checkSchema(): Promise<{ ready: boolean; message?: string }> {
   const { error } = await db().from('stores').select('id', { head: true, count: 'exact' }).limit(1)

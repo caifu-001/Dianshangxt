@@ -549,6 +549,25 @@ VITE_SUPABASE_KEY=sb_publishable_vBOpo9IQaKPg4ACt_nLopg_oiJQAKhy
 `publishable` / `anon` key 按设计是公开的，安全性由 RLS 保证：**数据范围由权限码决定，越权请求会被 Postgres 拒绝**。
 切勿把 `service_role` 密钥放进前端。
 
+## Amazon 平台数据自动同步（凭证待配置）
+
+系统支持各公司管理员用 OAuth 授权自己的 Amazon 店铺，自动同步订单 / 商品 / FBA 库存到现有业务表。
+详见 [`docs/AMAZON_SYNC_PLAN.md`](docs/AMAZON_SYNC_PLAN.md)（技术方案）与
+[`supabase/functions/README.md`](supabase/functions/README.md)（部署与密钥配置）。
+
+**当前状态：代码已就位，Amazon 应用凭证未配置**——功能入口会提示「自动同步尚未启用」，其余模块不受影响。
+拿到 Amazon 公共应用资质后：
+
+1. Supabase SQL Editor 执行 `supabase/platform_sync_schema.sql`（建连接表 / 日志表 / RLS / RPC）
+2. 部署 4 个 Edge Functions：`amazon-oauth-start` / `amazon-oauth-callback` / `amazon-sync` / `amazon-disconnect`
+3. 在 Supabase Edge Functions Secrets 填入 LWA / AWS / 加密密钥（清单见 functions README）
+4. 系统设置 →「平台账号连接」→ 连接 Amazon 店铺（仅公司管理员可见）
+5. GitHub 仓库 Settings → Secrets 加入 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SYNC_CRON_SECRET`，
+   定时任务 `.github/workflows/amazon-sync.yml` 每 30 分钟自动同步，也可在设置页手动点「立即同步」
+
+安全边界：refresh token 用 AES-GCM 加密存库、密钥只在服务端；不采集买家个人信息；
+费用字段暂留 0（避免污染利润生成列），后续接 Financial Events 再精确回填。
+
 ## 数据模型
 
 ```
@@ -639,7 +658,11 @@ npm run preview    # 预览构建产物
 
 ```
 ├─ supabase/
-│  └─ schema.sql            # 数据库初始化脚本（建表 + RLS + 触发器）
+│  ├─ schema.sql            # 数据库初始化脚本（建表 + RLS + 触发器）
+│  ├─ platform_sync_schema.sql  # Amazon 同步相关表 / RPC（凭证配置时执行）
+│  └─ functions/            # Edge Functions：Amazon OAuth 与数据同步
+├─ docs/
+│  └─ AMAZON_SYNC_PLAN.md   # Amazon 数据同步技术方案
 ├─ src/
 │  ├─ components/           # UI 组件、布局、图表、导入弹窗
 │  ├─ context/              # 认证上下文

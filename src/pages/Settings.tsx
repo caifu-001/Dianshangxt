@@ -19,6 +19,7 @@ import {
   Eraser,
 } from 'lucide-react'
 import schemaSql from '../../supabase/schema.sql?raw'
+import PlatformConnections from '../components/PlatformConnections'
 import { useAuth } from '../context/AuthContext'
 import { callRpc, deleteAllRows, fetchRows, updateRow } from '../lib/db'
 import { PLATFORM_CATALOG } from '../lib/constants'
@@ -559,6 +560,9 @@ export default function Settings() {
           )}
         </div>
       </div>
+
+      {/* 平台账号连接：Amazon OAuth 授权与自动同步 */}
+      <PlatformConnections />
 
       <div className="card mt-3 overflow-hidden">
         <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">

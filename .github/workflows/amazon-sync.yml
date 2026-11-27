@@ -1,0 +1,28 @@
+name: Amazon 数据同步（每 30 分钟）
+
+on:
+  schedule:
+    # UTC 时间：每小时的 :00 和 :30
+    - cron: '0,30 * * * *'
+  workflow_dispatch: # 支持在 GitHub 后台手动点运行
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 调用同步函数
+        run: |
+          RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST \
+            "${{ secrets.SUPABASE_URL }}/functions/v1/amazon-sync" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "x-cron-secret: ${{ secrets.SYNC_CRON_SECRET }}" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          CODE=$(echo "$RESPONSE" | tail -n 1)
+          echo "HTTP $CODE"
+          echo "$BODY"
+          # 未配置凭证（503）不算失败，只是提醒尚未启用
+          if [ "$CODE" != "200" ] && [ "$CODE" != "503" ]; then
+            exit 1
+          fi
