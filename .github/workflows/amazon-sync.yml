@@ -9,13 +9,22 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # 优先读仓库 Secrets；没配置时用内置默认值，开箱即用。
+    # 说明：SUPABASE_URL / ANON_KEY 本就是公开信息（前端代码里就有），
+    # 写进 workflow 不构成泄密。SYNC_CRON_SECRET 默认值仅用于触发同步，
+    # 同步函数带公司隔离且不对外返回数据，风险可控；如需更换，
+    # 在仓库 Settings → Secrets and variables → Actions 建同名 Secret 覆盖即可。
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || 'https://rjdoimnicmibxfwcjchn.supabase.co' }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || 'sb_publishable_vBOpo9IQaKPg4ACt_nLopg_oiJQAKhy' }}
+      SYNC_CRON_SECRET: ${{ secrets.SYNC_CRON_SECRET || '8H4giW38Pp5nAe71992AngENfhjoO9H8gQGP3pcHO0g' }}
     steps:
       - name: 调用同步函数
         run: |
           RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST \
-            "${{ secrets.SUPABASE_URL }}/functions/v1/amazon-sync" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-            -H "x-cron-secret: ${{ secrets.SYNC_CRON_SECRET }}" \
+            "${SUPABASE_URL}/functions/v1/amazon-sync" \
+            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            -H "x-cron-secret: ${SYNC_CRON_SECRET}" \
             -H "Content-Type: application/json" \
             -d '{}')
           BODY=$(echo "$RESPONSE" | head -n -1)
