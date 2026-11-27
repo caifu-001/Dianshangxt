@@ -66,3 +66,4 @@ fetch('https://rjdoimnicmibxfwcjchn.supabase.co/functions/v1/amazon-sync', {
 - **`npm:@supabase/supabase-js@2.45.4` 下载慢**：Supabase 首次部署会缓存依赖，第二次起很快。
 - **改了代码要更新**：网页控制台重新粘贴 → Deploy；CLI 版则 `supabase functions deploy <name>`。
 - **想用 CLI 一次部署全部**：`supabase login` → `supabase link --project-ref rjdoimnicmibxfwcjchn` → `supabase functions deploy --no-verify-jwt` 前先确认 JWT 校验需求；CLI 部署请用仓库根目录的模块化版本（`amazon-*/index.ts` + `_shared/`），**不要用本目录的合并版**。
+- **同步时报「记录已存在 / duplicate key / 唯一键重复」**：旧版同步函数的 `upsert(onConflict)` 带了 `user_id`，但订单/商品/库存的唯一键是团队级的 `(store_id, ...)`，导致 upsert 命中不了唯一约束而退化成插入冲突。本目录代码已修正为 `store_id,...`，**请把 4 个函数重新粘贴并 Deploy 一次**即可，无需改数据库。

@@ -74,7 +74,6 @@ export async function syncOrders(
     const { data } = await db
       .from('orders')
       .select('order_no,cost_amount,platform_fee,fba_fee,shipping_fee,ad_cost,refund_amount,other_fee')
-      .eq('user_id', ctx.userId)
       .eq('store_id', ctx.storeId)
       .in('order_no', allOrderNos.slice(0, 1000))
     for (const r of data ?? []) existing.set(String(r.order_no), r)
@@ -113,7 +112,7 @@ export async function syncOrders(
       }
       const { error } = await db
         .from('orders')
-        .upsert(row, { onConflict: 'user_id,store_id,order_no', ignoreDuplicates: false })
+        .upsert(row, { onConflict: 'store_id,order_no', ignoreDuplicates: false })
       if (error) counts.failed++
       else if (prev) counts.updated++
       else counts.new++
@@ -135,7 +134,6 @@ export async function syncProducts(
     const { data } = await db
       .from('products')
       .select('sku,cost_price,sale_price,currency,status,tags,note')
-      .eq('user_id', ctx.userId)
       .eq('store_id', ctx.storeId)
       .in('sku', skus.slice(0, 1000))
     for (const r of data ?? []) existing.set(String(r.sku), r)
@@ -164,7 +162,7 @@ export async function syncProducts(
     }
     const { error } = await db
       .from('products')
-      .upsert(row, { onConflict: 'user_id,store_id,sku', ignoreDuplicates: false })
+      .upsert(row, { onConflict: 'store_id,sku', ignoreDuplicates: false })
     if (error) counts.failed++
     else if (prev) counts.updated++
     else counts.new++
@@ -197,7 +195,7 @@ export async function syncInventory(
     }
     const { error } = await db
       .from('inventory')
-      .upsert(row, { onConflict: 'user_id,store_id,sku,warehouse', ignoreDuplicates: false })
+      .upsert(row, { onConflict: 'store_id,sku,warehouse', ignoreDuplicates: false })
     if (error) counts.failed++
     else counts.new++
   }

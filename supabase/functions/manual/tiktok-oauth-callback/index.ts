@@ -493,7 +493,6 @@ export async function syncTiktokOrders(
     const { data } = await db
       .from('orders')
       .select('order_no,cost_amount,platform_fee,fba_fee,shipping_fee,ad_cost,refund_amount,other_fee')
-      .eq('user_id', ctx.userId)
       .eq('store_id', ctx.storeId)
       .in('order_no', allNos.slice(0, 1000))
     for (const r of data ?? []) existing.set(String(r.order_no), r)
@@ -537,7 +536,7 @@ export async function syncTiktokOrders(
       }
       const { error } = await db
         .from('orders')
-        .upsert(row, { onConflict: 'user_id,store_id,order_no', ignoreDuplicates: false })
+        .upsert(row, { onConflict: 'store_id,order_no', ignoreDuplicates: false })
       if (error) counts.failed++
       else if (prev) counts.updated++
       else counts.new++
@@ -578,7 +577,6 @@ export async function syncTiktokProducts(
     const { data } = await db
       .from('products')
       .select('sku,cost_price,sale_price,currency,status,tags,note')
-      .eq('user_id', ctx.userId)
       .eq('store_id', ctx.storeId)
       .in('sku', skus.slice(0, 1000))
     for (const r of data ?? []) existing.set(String(r.sku), r)
@@ -608,7 +606,7 @@ export async function syncTiktokProducts(
     }
     const { error } = await db
       .from('products')
-      .upsert(row, { onConflict: 'user_id,store_id,sku', ignoreDuplicates: false })
+      .upsert(row, { onConflict: 'store_id,sku', ignoreDuplicates: false })
     if (error) counts.failed++
     else if (prev) counts.updated++
     else counts.new++
@@ -645,7 +643,7 @@ export async function syncTiktokInventory(
         inbound_qty: 0,
         reserved_qty: 0,
         updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,store_id,sku,warehouse', ignoreDuplicates: false })
+      }, { onConflict: 'store_id,sku,warehouse', ignoreDuplicates: false })
     if (error) counts.failed++
     else counts.new++
   }

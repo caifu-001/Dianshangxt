@@ -76,3 +76,4 @@ fetch('https://rjdoimnicmibxfwcjchn.supabase.co/functions/v1/tiktok-sync', {
 - **token 7 天过期**：同步函数会自动刷新，无需人工干预。
 - **开发者邮箱**：注册开放平台用的邮箱不能和卖家账号绑定，否则只能走自用路线，开不了 Public App。
 - **改了代码要更新**：网页控制台重新粘贴 → Deploy；CLI 版用仓库根目录模块化版本（`tiktok-*/index.ts` + `_shared/`），不要用本目录合并版。
+- **同步时报「记录已存在 / duplicate key / 唯一键重复」**：旧版同步函数的 `upsert(onConflict)` 带了 `user_id`，但订单/商品/库存的唯一键是团队级的 `(store_id, ...)`，导致 upsert 命中不了唯一约束而退化成插入冲突。本目录代码已修正为 `store_id,...`，**请把 4 个函数重新粘贴并 Deploy 一次**即可，无需改数据库。
