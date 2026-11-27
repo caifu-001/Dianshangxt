@@ -17,6 +17,14 @@
 --  执行方式：Supabase 控制台 → SQL Editor → 粘贴全选 → Run。
 -- ============================================================
 
+-- ---------- 0. 前置：确保 access_requests 有 company_id 列 ----------
+-- 关键！老版本库若缺此列，第 6 步 create policy 引用 company_id 会直接报错，
+-- 导致超管例外策略创建失败 → 表现为「执行了脚本，超管还是没权限」。
+alter table public.access_requests add column if not exists company_id uuid;
+update public.access_requests
+   set company_id = '00000000-0000-0000-0000-000000000001'::uuid
+ where company_id is null;
+
 -- ---------- 1. 演示数据统计：公司管理员可看本公司 ----------
 create or replace function public.demo_data_stats()
 returns table (module text, table_name text, row_count bigint)
@@ -365,9 +373,17 @@ create policy "access_req_update_staff" on public.access_requests
     and (public.is_super_admin() or public.in_company(company_id))
   );
 
--- ---------- 完成 ----------
--- 注意：access_requests 的 company_id 列由 schema.sql 的通用补列块创建。
--- 若你的库是老版本且该列缺失，先执行：
---   alter table public.access_requests add column if not exists company_id uuid;
---   update public.access_requests set company_id = '00000000-0000-0000-0000-000000000001'::uuid where company_id is null;
--- 本脚本其余部分可安全重复执行。
+-- ---------- 自检：执行完立刻看策略是否落地（应看到 2 条，using 里含 is_super_admin） ----------
+select
+  policyname,
+  cmd as command,
+  using_expression
+from pg_policies
+where schemaname = 'public'
+  and tablename  = 'access_requests'
+  and policyname in ('access_req_select', 'access_req_update_staff')
+order by policyname;
+
+-- 若上面返回 2 行、且 using_expression 里能看到 is_super_admin，说明修复已真正生效。
+-- 本脚本可安全重复执行（幂等）。
+
