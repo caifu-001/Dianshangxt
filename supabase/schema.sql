@@ -61,6 +61,10 @@ create table if not exists public.companies (
 create unique index if not exists uq_companies_code
   on public.companies(lower(code)) where code is not null;
 
+-- 公司级配置：enabled_platforms = 该公司实际经营的平台编码数组。
+-- 权限：公司管理员/超管可通过 set_company_platforms() 修改，普通成员只读。
+alter table public.companies add column if not exists settings jsonb not null default '{}'::jsonb;
+
 insert into public.companies (id, name, code, status)
 values ('00000000-0000-0000-0000-000000000001', '默认公司', 'DEFAULT', 'active')
 on conflict (id) do nothing;
@@ -479,6 +483,36 @@ create index if not exists idx_competitors_status on public.competitors(status);
 -- 同一站点同一个 ASIN 只跟踪一次（ASIN 为空时不去重，允许手动录 TikTok 商品）
 create unique index if not exists uq_competitors_asin
   on public.competitors(platform, marketplace, asin) where asin is not null;
+
+-- -------------------------------------------------------------
+-- 多平台支持：放宽平台字段的 CHECK 约束
+-- 旧库重跑本脚本时 create table if not exists 不会更新已有约束，
+-- 因此这里统一以 drop + add 幂等重建。清单与前端 PLATFORM_CATALOG 一致。
+-- 新增平台时：前端 constants.ts 加一项 + 这里四个约束同步加编码 + 重跑脚本。
+-- -------------------------------------------------------------
+alter table public.stores drop constraint if exists stores_platform_check;
+alter table public.stores add constraint stores_platform_check
+  check (platform in ('amazon','tiktok','shopee','lazada','temu','walmart','ebay',
+    'aliexpress','mercadolibre','shopify','etsy','shein','target','wayfair',
+    'noon','coupang','ozon','newegg'));
+
+alter table public.campaigns drop constraint if exists campaigns_platform_check;
+alter table public.campaigns add constraint campaigns_platform_check
+  check (platform in ('amazon','tiktok','shopee','lazada','temu','walmart','ebay',
+    'aliexpress','mercadolibre','shopify','etsy','shein','target','wayfair',
+    'noon','coupang','ozon','newegg'));
+
+alter table public.competitors drop constraint if exists competitors_platform_check;
+alter table public.competitors add constraint competitors_platform_check
+  check (platform in ('amazon','tiktok','shopee','lazada','temu','walmart','ebay',
+    'aliexpress','mercadolibre','shopify','etsy','shein','target','wayfair',
+    'noon','coupang','ozon','newegg'));
+
+alter table public.orders drop constraint if exists orders_channel_check;
+alter table public.orders add constraint orders_channel_check
+  check (channel in ('amazon','tiktok','shopee','lazada','temu','walmart','ebay',
+    'aliexpress','mercadolibre','shopify','etsy','shein','target','wayfair',
+    'noon','coupang','ozon','newegg','other'));
 
 create table if not exists public.competitor_snapshots (
   id                uuid primary key default gen_random_uuid(),
@@ -1852,13 +1886,13 @@ $$;
 create or replace function public.my_company()
 returns table (
   id uuid, name text, code text, status text, note text,
-  member_count bigint, created_at timestamptz
+  member_count bigint, created_at timestamptz, settings jsonb
 )
 language sql stable security definer set search_path = public
 as $$
   select c.id, c.name, c.code, c.status, c.note,
          (select count(*) from public.profiles p where p.company_id = c.id),
-         c.created_at
+         c.created_at, c.settings
     from public.companies c
    where c.id = public.current_company_id()
      and public.is_active_user();
@@ -2234,6 +2268,65 @@ as $$
        where p.id = auth.uid()
     ) x
   ), false);
+$$;
+
+-- -------------------------------------------------------------
+-- 公司经营平台
+-- companies 表 RLS 只放超管，公司管理员通过下面两个 security definer
+-- RPC 读取/修改自己公司的平台配置，普通成员只读。
+-- -------------------------------------------------------------
+create or replace function public.company_platforms()
+returns text[]
+language sql stable security definer set search_path = public
+as $$
+  select coalesce(
+    array(select x from jsonb_array_elements_text(
+      coalesce(
+        (select settings -> 'enabled_platforms' from public.companies where id = public.current_company_id()),
+        '[]'::jsonb
+      )
+    ) as x),
+    '{}'::text[]
+  );
+$$;
+
+create or replace function public.set_company_platforms(p_platforms text[])
+returns jsonb
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_company uuid := public.current_company_id();
+  v_allowed text[] := array['amazon','tiktok','shopee','lazada','temu','walmart','ebay',
+    'aliexpress','mercadolibre','shopify','etsy','shein','target','wayfair',
+    'noon','coupang','ozon','newegg'];
+  v_clean text[];
+begin
+  if v_company is null then
+    raise exception '当前账号未归属任何公司';
+  end if;
+  if not (public.is_super_admin() or public.has_permission('system.manage')) then
+    raise exception '仅公司管理员可设置经营平台';
+  end if;
+
+  select coalesce(array_agg(distinct p order by p), '{}'::text[])
+    into v_clean
+    from unnest(coalesce(p_platforms, '{}'::text[])) as p
+   where p = any(v_allowed);
+
+  update public.companies
+     set settings = coalesce(settings, '{}'::jsonb)
+                    || jsonb_build_object('enabled_platforms', to_jsonb(v_clean))
+   where id = v_company;
+
+  perform public.record_system_event(
+    'business', 'company_platforms.update',
+    '更新公司经营平台：' || array_to_string(v_clean, ','),
+    jsonb_build_object('company_id', v_company, 'platforms', to_jsonb(v_clean)),
+    'company', v_company::text
+  );
+
+  return jsonb_build_object('ok', true, 'platforms', to_jsonb(v_clean));
+end;
 $$;
 
 do $do$
@@ -4144,6 +4237,8 @@ grant execute on function public.in_company(uuid) to authenticated;
 grant execute on function public.assert_row_company(text, uuid) to authenticated;
 grant execute on function public.list_companies() to authenticated;
 grant execute on function public.my_company() to authenticated;
+grant execute on function public.company_platforms() to authenticated;
+grant execute on function public.set_company_platforms(text[]) to authenticated;
 grant execute on function public.create_company(text, text, text) to authenticated;
 grant execute on function public.update_company(uuid, text, text, text, text) to authenticated;
 grant execute on function public.switch_company(uuid) to authenticated;

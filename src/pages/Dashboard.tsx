@@ -21,7 +21,7 @@ import { useAsync } from '../hooks/useAsync'
 import { KpiCard } from '../components/KpiCard'
 import { DonutChart, RankBars, TrendChart } from '../components/charts'
 import { Badge, Button, EmptyState, ErrorBlock, PageHeader, Segmented, useToast } from '../components/ui'
-import { PLATFORM_LABEL, TASK_MODULE } from '../lib/constants'
+import { PLATFORM_CATALOG, PLATFORM_HEX, PLATFORM_LABEL, TASK_MODULE, platformMeta } from '../lib/constants'
 import { compactMoney, daysAgo, money, num, pct, relativeDay, sum } from '../lib/utils'
 import { convert, useFx } from '../lib/fx'
 import { seedDemoData } from '../lib/seed'
@@ -123,9 +123,14 @@ export default function Dashboard() {
     }
     const trend = Array.from(byDate.entries()).map(([date, v]) => ({ date, ...v }))
 
-    // 平台
-    const amazonSales = sum(cur.filter((o) => o.channel === 'amazon'), (o) => usd(o.gross_amount, o.store_id))
-    const tiktokSales = sum(cur.filter((o) => o.channel === 'tiktok'), (o) => usd(o.gross_amount, o.store_id))
+    // 平台：按全部内置平台分组，有销售额的平台才出现在图表里
+    const platformSales = PLATFORM_CATALOG
+      .map((p) => ({
+        name: p.label,
+        color: PLATFORM_HEX[p.code],
+        value: sum(cur.filter((o) => o.channel === p.code), (o) => usd(o.gross_amount, o.store_id)),
+      }))
+      .filter((p) => p.value > 0)
 
     // Top 商品
     const byProduct = new Map<string, { name: string; value: number; qty: number }>()
@@ -179,7 +184,7 @@ export default function Dashboard() {
       dSales: delta(sales, prevSales),
       dProfit: delta(profit, prevProfit),
       dOrders: delta(ordersCount, prevOrders),
-      trend, amazonSales, tiktokSales, topProducts, alerts, storeRows, openTasks,
+      trend, platformSales, topProducts, alerts, storeRows, openTasks,
       creators: 0,
     }
   }, [data, rangeValue.from, rangeValue.to, fx])
@@ -325,24 +330,20 @@ export default function Dashboard() {
 
         <div className="card p-4">
           <h3 className="text-[13.5px] font-semibold text-ink-900">平台销售占比</h3>
-          <p className="text-[11px] text-ink-400 mt-0.5">Amazon vs TikTok Shop</p>
+          <p className="text-[11px] text-ink-400 mt-0.5">按订单渠道统计各平台销售额</p>
           {loading || !metrics ? (
             <div className="skeleton h-[180px] w-full mt-3 rounded-full" />
+          ) : metrics.platformSales.length === 0 ? (
+            <p className="py-12 text-center text-[12px] text-ink-400">当前区间暂无订单</p>
           ) : (
             <>
               <DonutChart
-                data={[
-                  { name: 'Amazon', value: metrics.amazonSales, color: '#f59e0b' },
-                  { name: 'TikTok Shop', value: metrics.tiktokSales, color: '#161823' },
-                ]}
+                data={metrics.platformSales}
                 centerLabel="总销售额"
                 centerValue={compactMoney(metrics.sales)}
               />
               <div className="mt-2 space-y-2">
-                {[
-                  { name: 'Amazon', value: metrics.amazonSales, color: '#f59e0b' },
-                  { name: 'TikTok Shop', value: metrics.tiktokSales, color: '#161823' },
-                ].map((p) => (
+                {metrics.platformSales.map((p) => (
                   <div key={p.name} className="flex items-center gap-2 text-[12px]">
                     <span className="w-2 h-2 rounded-full" style={{ background: p.color }} />
                     <span className="text-ink-600">{p.name}</span>
@@ -453,10 +454,10 @@ export default function Dashboard() {
                             <span
                               className={
                                 'w-6 h-6 rounded-md flex items-center justify-center text-[9px] font-bold text-white ' +
-                                (row.store.platform === 'amazon' ? 'bg-amazon' : 'bg-tiktok')
+                                platformMeta(row.store.platform).badge
                               }
                             >
-                              {row.store.platform === 'amazon' ? 'a' : 't'}
+                              {platformMeta(row.store.platform).initial}
                             </span>
                             <div className="min-w-0">
                               <p className="text-[12.5px] font-medium text-ink-800 truncate max-w-[160px]">{row.store.name}</p>

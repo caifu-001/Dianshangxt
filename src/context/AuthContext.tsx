@@ -29,6 +29,8 @@ interface AuthContextValue {
   currentCompanyId: string | null
   /** 当前公司的展示信息（名称 / 编码 / 状态等），旧库未建 my_company 时为 null */
   currentCompany: Company | null
+  /** 当前公司启用的平台编码；空数组表示尚未配置（各模块展示全部平台） */
+  enabledPlatforms: string[]
   /** 有效权限码（系统角色上限 ∩ 自定义角色范围） */
   permissions: PermissionCode[]
   /** 权限判定，界面可见性统一走这里 */
@@ -67,6 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
   const [currentCompany, setCurrentCompany] = useState<Company | null>(null)
+  const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [schemaReady, setSchemaReady] = useState(true)
   const [schemaMessage, setSchemaMessage] = useState<string | null>(null)
@@ -99,13 +102,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  /** 当前公司展示信息：旧库还没有 my_company() 时静默降级，不影响登录 */
+  /** 当前公司展示信息 + 经营平台：旧库还没有对应 RPC 时静默降级，不影响登录 */
   const loadMyCompany = useCallback(async () => {
     try {
       const rows = await callRpc<Company[]>('my_company')
       setCurrentCompany(rows[0] ?? null)
     } catch {
       setCurrentCompany(null)
+    }
+    try {
+      const rows = await callRpc<string[]>('company_platforms')
+      setEnabledPlatforms(Array.isArray(rows) ? rows : [])
+    } catch {
+      // 数据库脚本未升级：按「未配置」处理，各模块展示全部平台
+      setEnabledPlatforms([])
     }
   }, [])
 
@@ -294,7 +304,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await loadProfile(session.user.id)
       await loadRoles()
     }
-  }, [loadProfile, loadRoles, session?.user])
+    // 公司平台配置属于公司级信息，一并刷新（设置页保存后即时生效）
+    await loadMyCompany()
+  }, [loadProfile, loadRoles, loadMyCompany, session?.user])
 
   const updateSettings = useCallback(async (patch: Record<string, unknown>) => {
     if (!profile) throw new Error('登录状态已失效，请重新登录')
@@ -343,6 +355,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           ? profile?.active_company_id ?? '00000000-0000-0000-0000-000000000001'
           : profile?.company_id ?? null,
       currentCompany,
+      enabledPlatforms,
       permissions,
       can: (code: PermissionCode) => allowed.has(code),
       customRole,
@@ -360,7 +373,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       updateSettings,
     }
   }, [
-    session, profile, currentCompany, role, permissions, customRole, deptPermissions, loading, schemaReady, schemaMessage, blocked,
+    session, profile, currentCompany, enabledPlatforms, role, permissions, customRole, deptPermissions, loading, schemaReady, schemaMessage, blocked,
     recheckSchema, signIn, signUp, sendOtp, verifyOtp, changePassword, signOut, refreshProfile, updateSettings,
   ])
 

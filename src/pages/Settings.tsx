@@ -8,6 +8,7 @@ import {
   Database,
   Download,
   ExternalLink,
+  Globe2,
   Info,
   Loader2,
   RefreshCw,
@@ -20,6 +21,7 @@ import {
 import schemaSql from '../../supabase/schema.sql?raw'
 import { useAuth } from '../context/AuthContext'
 import { callRpc, deleteAllRows, fetchRows, updateRow } from '../lib/db'
+import { PLATFORM_CATALOG } from '../lib/constants'
 import { PROJECT_REF, SQL_EDITOR_URL, SUPABASE_URL } from '../lib/supabase'
 import { seedDemoData } from '../lib/seed'
 import {
@@ -82,7 +84,7 @@ const COUNTS: Array<{ table: string; label: string }> = [
 ]
 
 export default function Settings() {
-  const { user, profile, refreshProfile, schemaReady, changePassword, can, currentCompany, isSuperAdmin } = useAuth()
+  const { user, profile, refreshProfile, schemaReady, changePassword, can, currentCompany, isSuperAdmin, enabledPlatforms } = useAuth()
   // 汇率、演示数据、清空数据属于系统级操作，由 system.manage 权限决定
   const canManageSystem = can('system.manage')
   const { push } = useToast()
@@ -110,6 +112,9 @@ export default function Settings() {
   const [demoLoading, setDemoLoading] = useState(false)
   const [demoPurging, setDemoPurging] = useState(false)
   const [demoConfirm, setDemoConfirm] = useState('')
+  // 公司经营平台
+  const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>([])
+  const [savingPlatforms, setSavingPlatforms] = useState(false)
   const [curPw, setCurPw] = useState('')
   const [newPw, setNewPw] = useState('')
   const [confirmPw, setConfirmPw] = useState('')
@@ -121,6 +126,10 @@ export default function Settings() {
     setFullName(profile?.full_name ?? '')
     setCompany(profile?.company ?? '')
   }, [profile])
+
+  useEffect(() => {
+    setSelectedPlatforms(enabledPlatforms)
+  }, [enabledPlatforms])
 
   useEffect(() => {
     const codes = resolveFxCodes(profile?.settings)
@@ -161,6 +170,21 @@ export default function Settings() {
       active = false
     }
   }, [schemaReady, seeding, clearing])
+
+  /** 保存公司启用的平台；未选择任何平台时按「未配置」处理，各模块展示全部平台 */
+  async function savePlatforms() {
+    if (!canManageSystem || !currentCompany) return
+    setSavingPlatforms(true)
+    try {
+      await callRpc('set_company_platforms', { p_platforms: selectedPlatforms })
+      await refreshProfile()
+      push('公司经营平台已保存')
+    } catch (err) {
+      push(err instanceof Error ? err.message : '保存失败', 'error')
+    } finally {
+      setSavingPlatforms(false)
+    }
+  }
 
   async function saveProfile() {
     if (!user) return
@@ -461,6 +485,77 @@ export default function Settings() {
             <p className="text-[12px] text-ink-500 leading-relaxed">
               当前账号未归属任何公司，或系统尚未完成升级。请联系系统管理员处理后查看。
             </p>
+          )}
+        </div>
+      </div>
+
+      {/* 公司经营平台：由公司管理员自行勾选，决定各模块下拉可选范围 */}
+      <div className="card mt-3 overflow-hidden">
+        <div className="px-4 py-3 border-b border-ink-100 flex items-center gap-2">
+          <Globe2 className="w-4 h-4 text-ink-400" />
+          <h3 className="text-[13.5px] font-semibold text-ink-900">经营平台</h3>
+          {currentCompany && <Badge tone="gray">{currentCompany.name}</Badge>}
+          {!canManageSystem && <Badge tone="gray">只读</Badge>}
+        </div>
+        <div className="p-4">
+          <p className="text-[11px] text-ink-400 mb-3 leading-relaxed">
+            勾选公司实际经营的平台。新增店铺、广告、竞品时下拉只列出这里选择的平台；
+            一个平台都不选则默认显示全部平台。平台佣金率、广告类型与常用站点会随平台自动带入。
+          </p>
+          {Array.from(new Set(PLATFORM_CATALOG.map((p) => p.region))).map((region) => (
+            <div key={region} className="mb-3">
+              <p className="text-[11px] font-medium text-ink-500 mb-1.5">{region}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {PLATFORM_CATALOG.filter((p) => p.region === region).map((p) => {
+                  const active = selectedPlatforms.includes(p.code)
+                  return (
+                    <button
+                      key={p.code}
+                      type="button"
+                      disabled={!canManageSystem || !currentCompany}
+                      onClick={() =>
+                        setSelectedPlatforms((prev) =>
+                          active ? prev.filter((c) => c !== p.code) : [...prev, p.code],
+                        )
+                      }
+                      className={cn(
+                        'inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11.5px] transition-colors',
+                        active
+                          ? 'border-brand-300 bg-brand-50 text-brand-700'
+                          : 'border-ink-200 bg-white text-ink-500',
+                        canManageSystem && currentCompany && 'hover:border-brand-300',
+                        (!canManageSystem || !currentCompany) && 'cursor-default opacity-80',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'w-3.5 h-3.5 rounded flex items-center justify-center text-[7px] font-bold text-white',
+                          p.badge,
+                        )}
+                      >
+                        {p.initial}
+                      </span>
+                      {p.label}
+                      {active && <Check className="w-3 h-3" />}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+          {canManageSystem && currentCompany && (
+            <div className="mt-3 flex items-center gap-2">
+              <Button variant="primary" disabled={savingPlatforms} onClick={savePlatforms}>
+                {savingPlatforms ? '保存中…' : '保存经营平台'}
+              </Button>
+              <span className="text-[11px] text-ink-400">
+                已选 {selectedPlatforms.length} 个平台
+                {selectedPlatforms.length === 0 && '（未配置，显示全部）'}
+              </span>
+            </div>
+          )}
+          {!canManageSystem && (
+            <p className="mt-2 text-[11px] text-ink-400">如需调整经营平台，请联系公司管理员。</p>
           )}
         </div>
       </div>

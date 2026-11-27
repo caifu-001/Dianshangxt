@@ -15,7 +15,8 @@ import {
 import { CartesianGrid, Line, ComposedChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import dayjs from 'dayjs'
 import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
-import { COMPETITOR_STATUS, MARKETPLACES, PRICE_POSITION, PLATFORM_LABEL, marketplaceMeta } from '../lib/constants'
+import { COMPETITOR_STATUS, MARKETPLACES, PRICE_POSITION, marketplaceMeta, platformMeta, platformOptions } from '../lib/constants'
+import { useAuth } from '../context/AuthContext'
 import type { Competitor, CompetitorSnapshot, Platform, Product, Store } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import { useFx, convert } from '../lib/fx'
@@ -113,6 +114,7 @@ function ratingText(rating: number) {
 
 export default function Competitors() {
   const { push } = useToast()
+  const { enabledPlatforms } = useAuth()
   const fx = useFx()
 
   const [search, setSearch] = useState('')
@@ -459,7 +461,7 @@ export default function Competitors() {
         title: `竞品跟进：${c.title.slice(0, 40)}`,
         description: [
           `竞品：${c.brand ? `${c.brand} · ` : ''}${c.title}`,
-          `站点：${c.platform === 'amazon' ? 'Amazon' : 'TikTok Shop'} ${c.marketplace}${c.asin ? ` · ${c.asin}` : ''}`,
+          `站点：${platformMeta(c.platform).label} ${c.marketplace}${c.asin ? ` · ${c.asin}` : ''}`,
           `当前售价：${money(c.price, c.currency)}｜评分 ${ratingText(c.rating)}｜评论 ${num(c.reviews)}｜BSR ${c.bsr ? num(c.bsr) : '—'}`,
           `对接我方：${c.product ? `${c.product.sku}（售价 ${money(c.product.sale_price, c.product.currency)}）` : '未关联'}`,
           `价格位置：${gapText}`,
@@ -526,10 +528,7 @@ export default function Competitors() {
             value={platformFilter}
             onChange={(v) => { setPlatformFilter(v); setPage(1) }}
             placeholder="全部平台"
-            options={[
-              { value: 'amazon', label: PLATFORM_LABEL.amazon },
-              { value: 'tiktok', label: PLATFORM_LABEL.tiktok },
-            ]}
+            options={platformOptions(enabledPlatforms).map((p) => ({ value: p.code, label: p.label }))}
           />
           <Select
             className="w-full sm:w-32"
@@ -616,10 +615,10 @@ export default function Competitors() {
                           <span
                             className={cn(
                               'w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0',
-                              c.platform === 'amazon' ? 'bg-amazon' : 'bg-tiktok',
+                              platformMeta(c.platform).badge,
                             )}
                           >
-                            {c.platform === 'amazon' ? 'a' : 't'}
+                            {platformMeta(c.platform).initial}
                           </span>
                           <span className="text-[11.5px] text-ink-600">
                             {marketplaceMeta(c.marketplace).name}
@@ -696,7 +695,7 @@ export default function Competitors() {
         title={detail?.title ?? '竞品详情'}
         description={
           detail
-            ? `${detail.platform === 'amazon' ? 'Amazon' : 'TikTok Shop'} ${detail.marketplace}${detail.asin ? ` · ${detail.asin}` : ''} · 最近采集 ${fmtDate(detail.last_checked)}`
+            ? `${platformMeta(detail.platform).label} ${detail.marketplace}${detail.asin ? ` · ${detail.asin}` : ''} · 最近采集 ${fmtDate(detail.last_checked)}`
             : undefined
         }
         width="max-w-3xl"

@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Activity, Megaphone, Pause, Pencil, Play, Plus, Receipt, Target, Trash2 } from 'lucide-react'
 import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
-import { AD_TYPES, CAMPAIGN_STATUS } from '../lib/constants'
+import { AD_TYPES, CAMPAIGN_STATUS, platformHasAds, platformMeta, platformOptions } from '../lib/constants'
+import { useAuth } from '../context/AuthContext'
 import type { Campaign, Store } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
@@ -60,6 +61,7 @@ const EMPTY: FormState = {
 
 export default function Ads({ embedded = false }: { embedded?: boolean }) {
   const { push } = useToast()
+  const { enabledPlatforms } = useAuth()
   const [search, setSearch] = useState('')
   const [storeFilter, setStoreFilter] = useState('')
   const [platformFilter, setPlatformFilter] = useState('')
@@ -224,9 +226,10 @@ export default function Ads({ embedded = false }: { embedded?: boolean }) {
     }
   }
 
-  const adTypeOptions = form.store_id && storeMap.get(form.store_id)?.platform === 'tiktok'
-    ? ['GMV_MAX', 'VIDEO', 'LIVE', 'PSA']
-    : ['SP', 'SB', 'SD']
+  // 广告类型由所选店铺的平台决定；不支持站内广告的平台给出空列表提示
+  const adTypeOptions = form.store_id
+    ? platformMeta(storeMap.get(form.store_id)?.platform).adTypes
+    : []
 
   const headerActions = (
     <>
@@ -297,10 +300,7 @@ export default function Ads({ embedded = false }: { embedded?: boolean }) {
             value={platformFilter}
             onChange={(v) => { setPlatformFilter(v); setPage(1) }}
             placeholder="全部平台"
-            options={[
-              { value: 'amazon', label: 'Amazon' },
-              { value: 'tiktok', label: 'TikTok Shop' },
-            ]}
+            options={platformOptions(enabledPlatforms).map((p) => ({ value: p.code, label: p.label }))}
           />
           <Select
             className="w-full sm:w-28"
@@ -368,16 +368,16 @@ export default function Ads({ embedded = false }: { embedded?: boolean }) {
                           <span
                             className={cn(
                               'w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0',
-                              c.platform === 'amazon' ? 'bg-amazon' : 'bg-tiktok',
+                              platformMeta(c.platform).badge,
                             )}
                           >
-                            {c.platform === 'amazon' ? 'a' : 't'}
+                            {platformMeta(c.platform).initial}
                           </span>
                           <span className="text-[11.5px] truncate max-w-[110px]">{store?.name ?? '—'}</span>
                         </div>
                       </td>
                       <td className="td">
-                        <Badge tone={c.platform === 'amazon' ? 'amber' : 'violet'}>{AD_TYPES[c.ad_type] ?? c.ad_type}</Badge>
+                        <Badge tone={platformMeta(c.platform).tone}>{AD_TYPES[c.ad_type] ?? c.ad_type}</Badge>
                       </td>
                       <td className="td text-right num">{money(c.spend, store?.currency, 0)}</td>
                       <td className="td text-right num font-medium">{money(c.sales, store?.currency, 0)}</td>
@@ -453,7 +453,10 @@ export default function Ads({ embedded = false }: { embedded?: boolean }) {
           <Field label="活动名称" required>
             <input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="如：SP 自动-广泛匹配" />
           </Field>
-          <Field label="广告类型">
+          <Field
+            label="广告类型"
+            hint={!platformHasAds(storeMap.get(form.store_id)?.platform) ? '该平台暂无站内广告模块，站外投放可在费用管理登记' : undefined}
+          >
             <Select value={form.ad_type} onChange={(v) => setForm({ ...form, ad_type: v })} options={adTypeOptions.map((t) => ({ value: t, label: AD_TYPES[t] ?? t }))} />
           </Field>
           <Field label="投放状态">

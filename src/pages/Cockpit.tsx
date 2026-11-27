@@ -35,6 +35,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { platformMeta } from '../lib/constants'
 import { fetchRows, type QueryOptions } from '../lib/db'
 import { useFx } from '../lib/fx'
 import { buildCockpit, INVENTORY_COLORS, type CockpitRaw } from '../lib/cockpitModel'
@@ -633,10 +634,10 @@ export default function Cockpit() {
                           <span
                             className={cn(
                               'w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0',
-                              row.platform === 'amazon' ? 'bg-amazon' : 'bg-cyan-500',
+                              platformMeta(row.platform).badge,
                             )}
                           >
-                            {row.platform === 'amazon' ? 'a' : 't'}
+                            {platformMeta(row.platform).initial}
                           </span>
                           <span className="text-slate-300 truncate max-w-[104px]" title={row.name}>
                             {row.name}

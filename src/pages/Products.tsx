@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Download, ImageOff, Package, Pencil, Plus, Trash2, Upload } from 'lucide-react'
 import { deleteRow, fetchRows, insertRows, insertRow, updateRow } from '../lib/db'
-import { PLATFORM_LABEL, PRODUCT_STATUS, marketplaceMeta } from '../lib/constants'
+import { PLATFORM_LABEL, PRODUCT_STATUS, marketplaceMeta, platformMeta } from '../lib/constants'
 import type { Product, Store } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
 import {
@@ -328,10 +328,10 @@ export default function Products() {
                           <span
                             className={cn(
                               'w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0',
-                              store?.platform === 'amazon' ? 'bg-amazon' : 'bg-tiktok',
+                              platformMeta(store?.platform).badge,
                             )}
                           >
-                            {store?.platform === 'amazon' ? 'a' : 't'}
+                            {platformMeta(store?.platform).initial}
                           </span>
                           <span className="text-[12px] truncate max-w-[130px]">{store?.name ?? '—'}</span>
                         </div>

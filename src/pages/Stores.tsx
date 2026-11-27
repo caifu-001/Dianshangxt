@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Archive, MoreHorizontal, Pencil, Plus, Store as StoreIcon, Target, Trash2 } from 'lucide-react'
 import { deleteRow, fetchRows, insertRow, updateRow } from '../lib/db'
-import { MARKETPLACES, PLATFORM_LABEL, STORE_STATUS, marketplaceMeta } from '../lib/constants'
+import { MARKETPLACES, PLATFORM_LABEL, STORE_STATUS, marketplaceMeta, platformMeta, platformOptions, PLATFORM_CATALOG } from '../lib/constants'
+import { useAuth } from '../context/AuthContext'
 import { fxLabel, useFxCodes } from '../lib/fx'
 import type { Campaign, Order, Platform, Product, Store } from '../lib/types'
 import { useAsync } from '../hooks/useAsync'
@@ -44,6 +45,7 @@ const EMPTY: FormState = {
 
 export default function Stores() {
   const { push } = useToast()
+  const { enabledPlatforms } = useAuth()
   const fxCodes = useFxCodes()
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<Store | null>(null)
@@ -158,14 +160,17 @@ export default function Stores() {
     setForm((f) => ({ ...f, marketplace: code, currency: meta.currency }))
   }
 
-  const amazonCount = data?.stores.filter((s) => s.platform === 'amazon').length ?? 0
-  const tiktokCount = data?.stores.filter((s) => s.platform === 'tiktok').length ?? 0
+  // 只展示实际有店铺的平台，避免 18 个平台全部铺在统计条上
+  const platformStats = PLATFORM_CATALOG
+    .map((p) => ({ ...p, count: data?.stores.filter((s) => s.platform === p.code).length ?? 0 }))
+    .filter((p) => p.count > 0)
+  const activePlatformOptions = platformOptions(enabledPlatforms)
 
   return (
     <>
       <PageHeader
         title="店铺管理"
-        description="Amazon 与 TikTok Shop 多店铺、多站点统一档案"
+        description="多平台、多站点统一店铺档案"
         actions={
           <Button variant="primary" icon={<Plus className="w-3.5 h-3.5" />} onClick={openCreate}>
             新增店铺
@@ -174,12 +179,15 @@ export default function Stores() {
       />
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
-        <Badge tone="amber" dot>
-          Amazon {amazonCount}
-        </Badge>
-        <Badge tone="gray" dot>
-          TikTok Shop {tiktokCount}
-        </Badge>
+        {platformStats.length ? (
+          platformStats.map((p) => (
+            <Badge key={p.code} tone={p.tone} dot>
+              {p.label} {p.count}
+            </Badge>
+          ))
+        ) : (
+          <Badge tone="gray" dot>暂无店铺</Badge>
+        )}
         <span className="text-[11.5px] text-ink-400">下方面板数据统计口径：近 30 天</span>
       </div>
 
@@ -222,10 +230,10 @@ export default function Stores() {
                   <div
                     className={cn(
                       'w-9 h-9 rounded-lg flex items-center justify-center text-white text-[13px] font-bold shrink-0',
-                      store.platform === 'amazon' ? 'bg-amazon' : 'bg-tiktok',
+                      platformMeta(store.platform).badge,
                     )}
                   >
-                    {store.platform === 'amazon' ? 'a' : 't'}
+                    {platformMeta(store.platform).initial}
                   </div>
                   <div className="min-w-0 flex-1">
                     <p className="text-[13.5px] font-semibold text-ink-900 truncate">{store.name}</p>
@@ -325,11 +333,16 @@ export default function Stores() {
           <Field label="平台" required>
             <Select
               value={form.platform}
-              onChange={(v) => setForm({ ...form, platform: v as Platform })}
-              options={[
-                { value: 'amazon', label: 'Amazon' },
-                { value: 'tiktok', label: 'TikTok Shop' },
-              ]}
+              onChange={(v) => {
+                const meta = platformMeta(v)
+                setForm({
+                  ...form,
+                  platform: v as Platform,
+                  marketplace: meta.markets[0] ?? 'US',
+                  currency: meta.currency,
+                })
+              }}
+              options={activePlatformOptions.map((p) => ({ value: p.code, label: p.label }))}
             />
           </Field>
           <Field label="站点">

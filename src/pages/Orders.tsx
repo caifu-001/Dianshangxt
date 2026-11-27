@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import dayjs from 'dayjs'
 import { callRpc, deleteRow, fetchRows, insertRow, insertRows, updateRow } from '../lib/db'
-import { ORDER_STATUS } from '../lib/constants'
+import { ORDER_STATUS, platformFeeRate, platformMeta } from '../lib/constants'
 import { useAuth } from '../context/AuthContext'
 import {
   APPROVAL_META,
@@ -296,7 +296,7 @@ export default function Orders() {
       title: product.title,
       unit_price: String(product.sale_price),
       cost_amount: String(Number((product.cost_price * qty).toFixed(2))),
-      platform_fee: String(Number((product.sale_price * qty * (store?.platform === 'amazon' ? 0.15 : 0.08)).toFixed(2))),
+      platform_fee: String(Number((product.sale_price * qty * (platformFeeRate(store?.platform))).toFixed(2))),
       country: f.country || store?.marketplace || '',
     }))
   }
@@ -312,7 +312,7 @@ export default function Orders() {
         ...f,
         quantity: value,
         cost_amount: String(Number((product.cost_price * qty).toFixed(2))),
-        platform_fee: String(Number((unit * qty * (store?.platform === 'amazon' ? 0.15 : 0.08)).toFixed(2))),
+        platform_fee: String(Number((unit * qty * (platformFeeRate(store?.platform))).toFixed(2))),
       }
     })
   }
@@ -556,7 +556,7 @@ export default function Orders() {
         quantity: qty,
         unit_price: unit,
         cost_amount: product ? Number((product.cost_price * qty).toFixed(2)) : 0,
-        platform_fee: toNum(row.platform_fee) || Number((gross * (store.platform === 'amazon' ? 0.15 : 0.08)).toFixed(2)),
+        platform_fee: toNum(row.platform_fee) || Number((gross * (platformFeeRate(store.platform))).toFixed(2)),
         fba_fee: toNum(row.fba_fee),
         shipping_fee: toNum(row.shipping_fee),
         ad_cost: toNum(row.ad_cost),
@@ -713,10 +713,10 @@ export default function Orders() {
                           <span
                             className={cn(
                               'w-4 h-4 rounded flex items-center justify-center text-[8px] font-bold text-white shrink-0',
-                              store?.platform === 'amazon' ? 'bg-amazon' : 'bg-tiktok',
+                              platformMeta(store?.platform).badge,
                             )}
                           >
-                            {store?.platform === 'amazon' ? 'a' : 't'}
+                            {platformMeta(store?.platform).initial}
                           </span>
                           <span className="text-[11.5px] truncate max-w-[110px]">{store?.name ?? '—'}</span>
                         </div>

@@ -8,6 +8,7 @@
  *  - 库存分档与运营概览、库存管理页共用同一套阈值
  */
 import dayjs from 'dayjs'
+import { PLATFORM_CATALOG, PLATFORM_HEX } from './constants'
 import type {
   Campaign,
   Competitor,
@@ -296,12 +297,15 @@ export function buildCockpit(raw: CockpitRaw, fx: FxRates): CockpitModel {
   const gmv30 = salesOf(orders30)
 
   // ---------- 平台 ----------
-  const amazonSales = sum(orders30.filter((o) => o.channel === 'amazon'), (o) => usd(o.gross_amount, o.store_id))
-  const tiktokSales = sum(orders30.filter((o) => o.channel === 'tiktok'), (o) => usd(o.gross_amount, o.store_id))
-  const otherSales = Math.max(0, gmv30 - amazonSales - tiktokSales)
+  const platformSales = PLATFORM_CATALOG.map((p) => ({
+    name: p.label,
+    value: sum(orders30.filter((o) => o.channel === p.code), (o) => usd(o.gross_amount, o.store_id)),
+    color: PLATFORM_HEX[p.code],
+  }))
+  const knownSales = platformSales.reduce((acc, p) => acc + p.value, 0)
+  const otherSales = Math.max(0, gmv30 - knownSales)
   const platformSplit = [
-    { name: 'Amazon', value: amazonSales, color: '#f59e0b' },
-    { name: 'TikTok Shop', value: tiktokSales, color: '#22d3ee' },
+    ...platformSales,
     ...(otherSales > 1 ? [{ name: '其他渠道', value: otherSales, color: '#818cf8' }] : []),
   ].filter((p) => p.value > 0)
 

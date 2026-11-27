@@ -1,4 +1,27 @@
-export type Platform = 'amazon' | 'tiktok'
+/**
+ * 平台编码：系统内置的主流跨境平台。
+ * 清单与元数据统一维护在 lib/constants.ts 的 PLATFORM_CATALOG，
+ * 公司可在「系统设置 → 经营平台」里勾选自己实际经营的平台。
+ */
+export type Platform =
+  | 'amazon'
+  | 'tiktok'
+  | 'shopee'
+  | 'lazada'
+  | 'temu'
+  | 'walmart'
+  | 'ebay'
+  | 'aliexpress'
+  | 'mercadolibre'
+  | 'shopify'
+  | 'etsy'
+  | 'shein'
+  | 'target'
+  | 'wayfair'
+  | 'noon'
+  | 'coupang'
+  | 'ozon'
+  | 'newegg'
 
 export type EmploymentStatus = 'pending' | 'active' | 'left'
 
@@ -44,6 +67,8 @@ export interface Company {
   note: string | null
   member_count: number
   created_at: string
+  /** 公司级配置：enabled_platforms 为该公司启用的平台编码数组 */
+  settings?: Record<string, unknown> | null
 }
 
 /* ---------------- 权限流程 ---------------- */
@@ -188,7 +213,8 @@ export interface Order {
   product_id: string | null
   order_no: string
   order_date: string
-  channel: 'amazon' | 'tiktok' | 'other'
+  /** 订单渠道：平台编码或 other（历史兼容值） */
+  channel: Platform | 'other'
   sku: string | null
   title: string | null
   customer_name: string | null
