@@ -83,7 +83,7 @@ const EVENT_META: Record<EmployeeEventType, { label: string; icon: typeof Users;
 }
 
 export default function AccessFlow() {
-  const { user, can, isStaff } = useAuth()
+  const { user, can, isStaff, isSuperAdmin } = useAuth()
   const { push } = useToast()
   const manage = can('account.manage')
 
@@ -287,9 +287,12 @@ export default function AccessFlow() {
         title="权限流程"
         description="权限申请与审批、人员变动留痕、资源归属与移交。所有动作都写审计记录，可追溯到人和时间。"
         actions={
-          <Button variant="primary" icon={<Send className="w-3.5 h-3.5" />} onClick={openRequest}>
-            申请权限
-          </Button>
+          // 平台超管已拥有全部权限，无需也不应申请权限；其申请自己无法审批，只会造成误判
+          !isSuperAdmin && (
+            <Button variant="primary" icon={<Send className="w-3.5 h-3.5" />} onClick={openRequest}>
+              申请权限
+            </Button>
+          )
         }
       />
 

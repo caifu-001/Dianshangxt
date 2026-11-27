@@ -2385,6 +2385,8 @@ create policy "profiles_select" on public.profiles
   for select to authenticated
   using (
     id = auth.uid()
+    -- 平台超管：全局可见，才能看到所有公司的申请者/操作人姓名，不受当前视角收敛
+    or public.is_super_admin()
     or (
       public.in_company(company_id)
       and (

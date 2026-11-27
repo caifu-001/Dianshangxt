@@ -10,6 +10,8 @@
 --   4. 公司管理员可查看 / 清理本公司演示数据
 --   5. 修复权限申请列表跨公司泄露（RLS 补租户过滤），同时保留平台超管跨公司看/批的能力
 --   6. 人员变动记录：超管可见所有公司（原先被 in_company 收敛到默认公司，导致看不到全量）
+--   7. 成员档案：超管可见所有公司（否则权限流程页姓名显示「未知成员」）
+--      另：前端隐藏超管账号的「申请权限」按钮（超管已拥有全部权限，无需申请）
 --
 --  仍保留超管专属（平台级，不下放）：
 --   创建/维护公司、审核公司入驻、跨公司调人、切换管理视角、
@@ -390,9 +392,29 @@ create policy "emp_events_select" on public.employee_events
     )
   );
 
--- ---------- 自检：执行完立刻看策略是否落地（应看到 2 条，using 里含 is_super_admin） ----------
+-- ---------- 8. 成员档案：超管可见所有公司，否则权限流程页姓名显示「未知成员」 ----------
+-- profiles_select 原先只有 in_company 过滤，超管被收敛到默认公司视角，
+-- 查看别公司的权限申请/变动记录时，申请者姓名会显示「未知成员」。给超管全局例外。
+drop policy if exists "profiles_select" on public.profiles;
+create policy "profiles_select" on public.profiles
+  for select to authenticated
+  using (
+    id = auth.uid()
+    or public.is_super_admin()
+    or (
+      public.in_company(company_id)
+      and (
+        public.has_permission('account.manage')
+        or public.has_permission('org.manage')
+        or public.has_permission('hr.view')
+      )
+    )
+  );
+
+-- ---------- 自检：执行完立刻看三张表的策略是否落地（using 里应含 is_super_admin） ----------
 -- 兼容写法：直接读 pg_policy 系统表，避免 pg_policies 视图列名在 PG15+ 改成 qual 导致报错
 select
+  c.relname                       as table_name,
   p.polname                       as policyname,
   trim(p.polcmd::text)            as command,
   pg_get_expr(p.polqual, c.oid)   as using_expression
@@ -400,10 +422,13 @@ from pg_policy p
 join pg_class c      on c.oid = p.polrelid
 join pg_namespace n  on n.oid = c.relnamespace
 where n.nspname = 'public'
-  and c.relname = 'access_requests'
-  and p.polname in ('access_req_select', 'access_req_update_staff')
-order by p.polname;
+  and (
+    (c.relname = 'access_requests'   and p.polname in ('access_req_select', 'access_req_update_staff'))
+    or (c.relname = 'employee_events' and p.polname = 'emp_events_select')
+    or (c.relname = 'profiles'        and p.polname = 'profiles_select')
+  )
+order by c.relname, p.polname;
 
--- 若上面返回 2 行、且 using_expression 里能看到 is_super_admin，说明修复已真正生效。
+-- 若上面返回 4 行、且每条 using_expression 里都能看到 is_super_admin，说明修复已真正生效。
 -- 本脚本可安全重复执行（幂等）。
 
