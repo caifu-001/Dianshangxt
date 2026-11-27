@@ -2586,7 +2586,12 @@ create policy "access_req_select" on public.access_requests
   for select to authenticated
   using (
     user_id = auth.uid()
-    or (public.has_permission('account.manage') and public.in_company(company_id))
+    or (
+      public.has_permission('account.manage')
+      -- 平台超管是全局最高权限：不受「当前管理视角」约束，可看所有公司的权限申请。
+      -- 公司管理员没有超管角色，仍被 in_company 限制在本公司范围内。
+      and (public.is_super_admin() or public.in_company(company_id))
+    )
   );
 
 -- 只能给自己申请，且新建一律 pending：
@@ -2603,8 +2608,14 @@ create policy "access_req_update_own" on public.access_requests
 
 create policy "access_req_update_staff" on public.access_requests
   for update to authenticated
-  using (public.has_permission('account.manage') and public.in_company(company_id))
-  with check (public.has_permission('account.manage') and public.in_company(company_id));
+  using (
+    public.has_permission('account.manage')
+    and (public.is_super_admin() or public.in_company(company_id))
+  )
+  with check (
+    public.has_permission('account.manage')
+    and (public.is_super_admin() or public.in_company(company_id))
+  );
 
 -- ---------- 人员变动流水（employee_events） ----------
 drop policy if exists "emp_events_select" on public.employee_events;
@@ -2872,7 +2883,11 @@ declare
   r      record;
   target record;
 begin
-  perform public.assert_row_company('access_requests', p_id);
+  -- 平台超管可跨公司审批（全局最高权限，不受当前管理视角约束）；
+  -- 公司管理员没有超管角色，仍受 assert_row_company 限制，只能批本公司的申请。
+  if not public.is_super_admin() then
+    perform public.assert_row_company('access_requests', p_id);
+  end if;
   if not public.has_permission('account.manage') then
     raise exception '只有管理员可以审批权限申请';
   end if;

@@ -8,7 +8,7 @@
 --   2. 公司管理员可办理本公司任意角色成员的离职（含其他管理员）
 --   3. 公司管理员可移除本公司成员档案（不能删自己 / 平台超管账号）
 --   4. 公司管理员可查看 / 清理本公司演示数据
---   5. 修复权限申请列表跨公司泄露（RLS 补租户过滤）
+--   5. 修复权限申请列表跨公司泄露（RLS 补租户过滤），同时保留平台超管跨公司看/批的能力
 --
 --  仍保留超管专属（平台级，不下放）：
 --   创建/维护公司、审核公司入驻、跨公司调人、切换管理视角、
@@ -273,7 +273,11 @@ declare
   r      record;
   target record;
 begin
-  perform public.assert_row_company('access_requests', p_id);
+  -- 平台超管可跨公司审批（全局最高权限，不受当前管理视角约束）；
+  -- 公司管理员没有超管角色，仍受 assert_row_company 限制，只能批本公司的申请。
+  if not public.is_super_admin() then
+    perform public.assert_row_company('access_requests', p_id);
+  end if;
   if not public.has_permission('account.manage') then
     raise exception '只有管理员可以审批权限申请';
   end if;
@@ -335,20 +339,31 @@ create policy "profiles_delete_staff" on public.profiles
     and (public.is_super_admin() or public.has_permission('account.manage'))
   );
 
--- ---------- 6. 权限申请列表/审批：补租户过滤，杜绝跨公司泄露 ----------
+-- ---------- 6. 权限申请列表/审批：补租户过滤，但保留超管跨公司能力 ----------
+-- 公司管理员：只能看/批本公司的申请（杜绝跨公司泄露）
+-- 平台超管：全局最高权限，不受「当前管理视角」约束，可看/批所有公司的申请
 drop policy if exists "access_req_select" on public.access_requests;
 create policy "access_req_select" on public.access_requests
   for select to authenticated
   using (
     user_id = auth.uid()
-    or (public.has_permission('account.manage') and public.in_company(company_id))
+    or (
+      public.has_permission('account.manage')
+      and (public.is_super_admin() or public.in_company(company_id))
+    )
   );
 
 drop policy if exists "access_req_update_staff" on public.access_requests;
 create policy "access_req_update_staff" on public.access_requests
   for update to authenticated
-  using (public.has_permission('account.manage') and public.in_company(company_id))
-  with check (public.has_permission('account.manage') and public.in_company(company_id));
+  using (
+    public.has_permission('account.manage')
+    and (public.is_super_admin() or public.in_company(company_id))
+  )
+  with check (
+    public.has_permission('account.manage')
+    and (public.is_super_admin() or public.in_company(company_id))
+  );
 
 -- ---------- 完成 ----------
 -- 注意：access_requests 的 company_id 列由 schema.sql 的通用补列块创建。
