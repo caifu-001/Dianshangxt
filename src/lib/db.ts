@@ -44,6 +44,12 @@ function translateDbError(message: string): string {
   if (/violates foreign key constraint/i.test(message)) {
     return '关联的数据不存在，可能已被删除'
   }
+  if (/violates check constraint/i.test(message)) {
+    if (/finance_expense_approvals/i.test(message)) {
+      return '费用审核流水写入失败：数据库函数仍是旧版，请联系管理员在 Supabase 执行审批热修复脚本（supabase/hotfix_expense_approval.sql）'
+    }
+    return '数据格式校验未通过，请检查填写内容后重试'
+  }
   if (/JSON object requested/i.test(message)) {
     return '没有找到对应的成员档案，可能账号刚创建还没同步完，请刷新页面重试'
   }
