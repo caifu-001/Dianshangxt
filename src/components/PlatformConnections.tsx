@@ -11,8 +11,9 @@ import {
   RefreshCw,
   Unplug,
 } from 'lucide-react'
-import { Badge, Button, ConfirmDialog, EmptyState, useToast } from './ui'
+import { Badge, Button, ConfirmDialog, useToast } from './ui'
 import { callRpc, fetchRows, invokeFunction } from '../lib/db'
+import { SUPABASE_KEY, SUPABASE_URL } from '../lib/supabase'
 import { fmtDateTime } from '../lib/utils'
 import { useAuth } from '../context/AuthContext'
 
@@ -69,6 +70,8 @@ export default function PlatformConnections() {
   const [connections, setConnections] = useState<Connection[]>([])
   const [stores, setStores] = useState<StoreRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [schemaReady, setSchemaReady] = useState(false)
+  const [functionStatus, setFunctionStatus] = useState<'checking' | 'ok' | 'unconfigured' | 'missing'>('checking')
   const [configMissing, setConfigMissing] = useState<string[] | null>(null)
   const [configHint, setConfigHint] = useState(false)
   const [connectingStore, setConnectingStore] = useState<string | null>(null)
@@ -77,18 +80,46 @@ export default function PlatformConnections() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    try {
-      const [conns, storeRows] = await Promise.all([
-        callRpc<Connection[]>('list_platform_connections'),
-        fetchRows<StoreRow>('stores', { columns: 'id,name,platform,marketplace,status' }),
-      ])
-      setConnections(Array.isArray(conns) ? conns : [])
-      setStores(storeRows.filter((s) => s.platform === 'amazon'))
-    } catch (err) {
-      push(err instanceof Error ? err.message : '加载失败', 'error')
-    } finally {
-      setLoading(false)
+    // 两个数据源独立加载：连接表 RPC 失败时也要把店铺列表显示出来，否则页面看起来是空的
+    const [connResult, storeResult] = await Promise.allSettled([
+      callRpc<Connection[]>('list_platform_connections'),
+      fetchRows<StoreRow>('stores', { columns: 'id,name,platform,marketplace,status' }),
+    ])
+    if (connResult.status === 'fulfilled') {
+      setConnections(Array.isArray(connResult.value) ? connResult.value : [])
+      setSchemaReady(true)
+    } else {
+      setConnections([])
+      const msg = connResult.reason instanceof Error ? connResult.reason.message : String(connResult.reason)
+      push(`读取店铺连接失败：${msg}`, 'error')
     }
+    if (storeResult.status === 'fulfilled') {
+      setStores(storeResult.value.filter((s) => s.platform === 'amazon'))
+    } else {
+      const msg = storeResult.reason instanceof Error ? storeResult.reason.message : String(storeResult.reason)
+      push(`读取店铺列表失败：${msg}`, 'error')
+    }
+    setLoading(false)
+
+    // 主动探测服务端函数：oauth-start 在最前面校验凭证，空 body 不会产生任何副作用。
+    void (async () => {
+      try {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/amazon-oauth-start`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            apikey: SUPABASE_KEY,
+            Authorization: `Bearer ${SUPABASE_KEY}`,
+          },
+          body: '{}',
+        })
+        if (res.status === 404) setFunctionStatus('missing')
+        else if (res.status === 503) setFunctionStatus('unconfigured')
+        else setFunctionStatus('ok')
+      } catch {
+        setFunctionStatus('missing')
+      }
+    })()
   }, [push])
 
   useEffect(() => { void load() }, [load])
@@ -173,8 +204,19 @@ export default function PlatformConnections() {
         {!canManage && <Badge tone="gray">只读</Badge>}
       </div>
       <div className="p-4">
-        {configHint ? (
-          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11.5px] text-amber-800">
+        {functionStatus === 'missing' ? (
+          <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-[11.5px] text-rose-800 mb-3">
+            <div className="flex items-center gap-1.5 font-medium mb-1">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              服务端同步函数尚未部署
+            </div>
+            <p className="leading-relaxed">
+              代码已就绪，但 4 个 Edge Functions 还没部署到 Supabase，所以现在无法连接店铺或自动同步。
+              请在 Supabase 控制台 → Edge Functions 部署 <code>supabase/functions</code> 下的函数后刷新本页。其余功能不受影响。
+            </p>
+          </div>
+        ) : configHint || functionStatus === 'unconfigured' ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11.5px] text-amber-800 mb-3">
             <div className="flex items-center gap-1.5 font-medium mb-1">
               <AlertTriangle className="w-3.5 h-3.5" />
               自动同步尚未启用
@@ -198,10 +240,15 @@ export default function PlatformConnections() {
             <Loader2 className="w-3.5 h-3.5 animate-spin" /> 加载连接状态…
           </div>
         ) : connections.length === 0 ? (
-          <EmptyState
-            title="还没有连接店铺"
-            description={availableStores.length ? '从下方选择一个 Amazon 店铺开始授权' : '请先在「店铺」页面添加 Amazon 店铺'}
-          />
+          <div className="rounded-lg border border-dashed border-ink-200 bg-ink-50/40 px-4 py-5 text-center">
+            <PlugZap className="w-6 h-6 mx-auto text-ink-300 mb-2" />
+            <p className="text-[12.5px] font-medium text-ink-700">还没有连接任何店铺</p>
+            <p className="text-[11px] text-ink-400 mt-1 leading-relaxed">
+              {availableStores.length
+                ? '从下方选择 Amazon 店铺发起授权，首次使用需先完成服务端配置。'
+                : '请先在「店铺管理」添加一个 Amazon 店铺，并完成下方的启用步骤。'}
+            </p>
+          </div>
         ) : (
           <div className="space-y-2">
             {connections.map((c) => {
@@ -240,26 +287,70 @@ export default function PlatformConnections() {
           </div>
         )}
 
-        {canManage && availableStores.length > 0 && configMissing === null && (
+        {canManage && availableStores.length > 0 && (
           <div className="mt-3 pt-3 border-t border-ink-100">
             <p className="text-[11px] text-ink-500 mb-2">可连接的 Amazon 店铺：</p>
             <div className="flex flex-wrap gap-2">
               {availableStores.map((s) => (
-                <Button key={s.id} size="sm" variant="default" disabled={connectingStore !== null} onClick={() => void startConnect(s.id)}>
+                <Button
+                  key={s.id}
+                  size="sm"
+                  variant="default"
+                  disabled={connectingStore !== null || functionStatus !== 'ok' || configMissing !== null}
+                  title={
+                    functionStatus === 'missing'
+                      ? '需先在 Supabase 部署 Edge Functions'
+                      : functionStatus === 'unconfigured'
+                        ? '需先在 Supabase 配置 Amazon 应用凭证'
+                        : undefined
+                  }
+                  onClick={() => void startConnect(s.id)}
+                >
                   {connectingStore === s.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
                   连接 {s.name}（{s.marketplace}）
                 </Button>
               ))}
             </div>
+            {functionStatus !== 'ok' && (
+              <p className="text-[10.5px] text-amber-600 mt-1.5">
+                {functionStatus === 'missing' ? '部署服务端函数后即可点击连接' : '完成服务端配置后即可点击连接'}
+              </p>
+            )}
           </div>
         )}
 
-        {canManage && connections.length > 0 && configMissing === null && (
+        {canManage && connections.length === 0 && (
+          <div className="mt-3 pt-3 border-t border-ink-100">
+            <p className="text-[11px] font-medium text-ink-600 mb-1.5">首次启用步骤（管理员）</p>
+            <ol className="text-[10.5px] text-ink-400 space-y-1.5 list-decimal list-inside leading-relaxed">
+              <li>
+                在 Supabase SQL Editor 执行 <code className="text-ink-500">supabase/platform_sync_schema.sql</code>
+                {schemaReady && <span className="ml-1 text-emerald-600">（已就绪）</span>}
+              </li>
+              <li>
+                部署服务端函数 <code className="text-ink-500">amazon-oauth-start / callback / sync / disconnect</code>
+                {functionStatus !== 'missing' && functionStatus !== 'checking' && <span className="ml-1 text-emerald-600">（已部署）</span>}
+              </li>
+              <li>
+                在 Supabase Secrets 填入 Amazon 应用凭证（LWA Client ID/Secret、AWS Key/Secret、Role ARN）
+                {functionStatus === 'ok' && <span className="ml-1 text-emerald-600">（已配置）</span>}
+              </li>
+              <li>在「店铺管理」添加 Amazon 店铺，回到这里点「连接」完成授权</li>
+            </ol>
+            <p className="text-[10px] text-ink-400 mt-2">
+              配置清单见仓库 <code>supabase/functions/README.md</code>；未完成配置前其它模块不受影响。
+            </p>
+          </div>
+        )}
+
+        {canManage && (
           <div className="mt-3 flex items-center gap-2">
-            <Button size="sm" variant="primary" disabled={syncing !== null} onClick={() => void runSync()}>
-              {syncing === '__all__' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-              同步全部店铺
-            </Button>
+            {connections.length > 0 && (
+              <Button size="sm" variant="primary" disabled={syncing !== null || configMissing !== null} onClick={() => void runSync()}>
+                {syncing === '__all__' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                同步全部店铺
+              </Button>
+            )}
             <Link to="/system-logs" className="inline-flex items-center gap-1 text-[11px] text-brand-600 hover:underline">
               查看同步日志 <ExternalLink className="w-3 h-3" />
             </Link>
