@@ -1,10 +1,12 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   Check,
   Circle,
   ClipboardList,
   Coins,
   FlaskConical,
+  Link2,
   Pencil,
   Plus,
   Rocket,
@@ -24,6 +26,7 @@ import type {
   DevProject,
   DevProjectStatus,
   DevStage,
+  FinanceExpense,
   Order,
   Product,
   Supplier,
@@ -134,6 +137,7 @@ export default function Development() {
   const { user, can } = useAuth()
   const canEdit = can('dev.edit')
   const fx = useFx()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [view, setView] = useState<View>('projects')
   const [search, setSearch] = useState('')
@@ -158,7 +162,7 @@ export default function Development() {
   })
 
   const { data, loading, error, reload } = useAsync(async () => {
-    const [projects, milestones, costs, suppliers, products, orders, directory] = await Promise.all([
+    const [projects, milestones, costs, suppliers, products, orders, directory, devExpenses] = await Promise.all([
       fetchRows<DevProject>('dev_projects', { order: { column: 'created_at', ascending: false } }),
       fetchRows<DevMilestone>('dev_milestones', { order: { column: 'created_at' } }),
       fetchRows<DevCost>('dev_costs', { order: { column: 'incurred_at', ascending: false } }),
@@ -168,9 +172,26 @@ export default function Development() {
         () => [] as Order[],
       ),
       callRpc<DirectoryRow[]>('team_directory').catch(() => [] as DirectoryRow[]),
+      fetchRows<FinanceExpense>('finance_expenses', {
+        columns: 'id,source_module,source_id,status,amount,currency,code',
+        filters: [['source_module', 'eq', 'dev']],
+      }).catch(() => [] as FinanceExpense[]),
     ])
-    return { projects, milestones, costs, suppliers, products, orders, directory }
+    return { projects, milestones, costs, suppliers, products, orders, directory, devExpenses }
   }, [])
+
+  // 从费用管理「查看该业务记录」跳回：?focus=dev_cost_id 打开费用台账并定位项目
+  const focusCostId = searchParams.get('focus')
+  useEffect(() => {
+    if (loading || !focusCostId) return
+    const cost = (data?.costs ?? []).find((c) => c.id === focusCostId)
+    if (cost) {
+      setView('costs')
+      setDetailId(cost.project_id)
+    }
+    setSearchParams({}, { replace: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, focusCostId, data])
 
   const memberMap = useMemo(() => new Map((data?.directory ?? []).map((m) => [m.id, m])), [data])
   const supplierMap = useMemo(() => new Map((data?.suppliers ?? []).map((s) => [s.id, s])), [data])
@@ -199,6 +220,21 @@ export default function Development() {
     }
     return map
   }, [data])
+
+  // 每笔开发费用对应的费用管理单据（source_module=dev, source_id=dev_cost.id）
+  const expenseByCost = useMemo(() => {
+    const map = new Map<string, FinanceExpense>()
+    for (const e of data?.devExpenses ?? []) {
+      if (e.source_id) map.set(e.source_id, e)
+    }
+    return map
+  }, [data])
+
+  /** 跳转到费用管理，预填归集这张开发费用 */
+  function goCollect(costId: string) {
+    const base = import.meta.env.BASE_URL.replace(/\/+$/, '')
+    window.open(`${base}/expenses?source=dev&source_id=${costId}`, '_blank')
+  }
 
   const progressOf = (projectId: string) => {
     const list = milestonesByProject.get(projectId) ?? []
@@ -640,7 +676,7 @@ export default function Development() {
           <div className="flex items-center justify-between px-4 py-3 border-b border-ink-100">
             <div>
               <p className="text-[12.5px] font-medium text-ink-700">开发费用台账</p>
-              <p className="text-[10.5px] text-ink-400">打样、模具、认证等投入按项目归集，外费按当前汇率折算为人民币统计</p>
+              <p className="text-[10.5px] text-ink-400">打样、模具、认证等投入按项目归集；点「去归集」可一键带入费用管理走审批付款流程</p>
             </div>
             <span className="text-[11.5px] text-ink-400">
               共 <span className="num text-ink-700 font-medium">{num(data?.costs.length ?? 0)}</span> 笔
@@ -661,6 +697,7 @@ export default function Development() {
                     <th className="th">费用项</th>
                     <th className="th">类别</th>
                     <th className="th text-right">金额</th>
+                    <th className="th">归集状态</th>
                     <th className="th">发生日期</th>
                     <th className="th">备注</th>
                     <th className="th w-16" />
@@ -680,6 +717,21 @@ export default function Development() {
                         <td className="td text-[11.5px] text-ink-700">{c.title}</td>
                         <td className="td"><Badge tone="gray">{COST_TEXT[c.category] ?? c.category}</Badge></td>
                         <td className="td text-right num text-ink-800">{money(c.amount, c.currency)}</td>
+                        <td className="td">
+                          {expenseByCost.has(c.id) ? (
+                            <Badge tone="green">已归集</Badge>
+                          ) : canEdit ? (
+                            <button
+                              className="inline-flex items-center gap-0.5 text-[11px] text-brand-600 hover:underline"
+                              onClick={() => goCollect(c.id)}
+                              title="跳转到费用管理，自动带入金额与科目"
+                            >
+                              <Link2 className="w-3 h-3" /> 去归集
+                            </button>
+                          ) : (
+                            <span className="text-[11px] text-ink-400">未归集</span>
+                          )}
+                        </td>
                         <td className="td text-[11px] text-ink-500 num">{fmtDate(c.incurred_at)}</td>
                         <td className="td text-[11px] text-ink-400 truncate max-w-[200px]">{c.note || '—'}</td>
                         <td className="td">
@@ -880,6 +932,17 @@ export default function Development() {
                       <span className="text-ink-700 flex-1 truncate">{c.title}</span>
                       <span className="text-[10.5px] text-ink-400 num">{fmtDate(c.incurred_at, 'MM-DD')}</span>
                       <span className="num font-medium text-ink-800">{money(c.amount, c.currency)}</span>
+                      {expenseByCost.has(c.id) ? (
+                        <Badge tone="green">已归集</Badge>
+                      ) : canEdit ? (
+                        <button
+                          className="inline-flex items-center gap-0.5 text-[10.5px] text-brand-600 hover:underline"
+                          onClick={() => goCollect(c.id)}
+                          title="跳转到费用管理，自动带入金额与科目"
+                        >
+                          <Link2 className="w-3 h-3" /> 去归集
+                        </button>
+                      ) : null}
                       {canEdit && (
                         <button className="p-1 rounded text-ink-300 hover:text-rose-600" onClick={() => setDeleteCost(c)}>
                           <Trash2 className="w-3.5 h-3.5" />
@@ -1084,7 +1147,9 @@ export default function Development() {
         onClose={() => setDeleteCost(null)}
         onConfirm={confirmDeleteCost}
         title="删除费用记录"
-        message={`确定删除「${deleteCost?.title ?? ''}」这笔开发费用吗？`}
+        message={deleteCost && expenseByCost.has(deleteCost.id)
+          ? `确定删除「${deleteCost.title}」这笔开发费用吗？注意：费用管理中由它归集生成的费用单会保留为独立财务凭证，不会一起删除。`
+          : `确定删除「${deleteCost?.title ?? ''}」这笔开发费用吗？`}
       />
     </>
   )

@@ -25,6 +25,7 @@ import { useAuth } from '../context/AuthContext'
 import { cn, downloadTextFile, fmtDate, money, num, pct, toCsv, today } from '../lib/utils'
 import { fxLabel, useFxCodes } from '../lib/fx'
 import {
+  DEV_COST_SUBITEM,
   EXPENSE_APPROVAL_ACTION_META,
   EXPENSE_CATEGORY_META,
   EXPENSE_SOURCE_META,
@@ -41,6 +42,7 @@ import type {
   Campaign,
   Creator,
   Department,
+  DevCost,
   DevProject,
   ExpenseCategory,
   ExpenseSourceModule,
@@ -181,7 +183,7 @@ export default function Expenses() {
   const [payDraft, setPayDraft] = useState({ paid_at: today(), method: 'bank', voucher: '', note: '' })
 
   const load = async () => {
-    const [expenses, items, budgets, approvals, directory, departments, stores, projects, campaigns, creators, brandInfluencers, spendSummary] = await Promise.all([
+    const [expenses, items, budgets, approvals, directory, departments, stores, projects, campaigns, creators, brandInfluencers, devCosts, spendSummary] = await Promise.all([
       fetchRows<FinanceExpense>('finance_expenses', { order: { column: 'expense_date', ascending: false } }),
       fetchRows<FinanceExpenseItem>('finance_expense_items', { order: { column: 'created_at', ascending: true } }),
       fetchRows<FinanceBudget>('finance_budgets', { order: { column: 'period', ascending: false } }),
@@ -193,9 +195,10 @@ export default function Expenses() {
       fetchRows<Campaign>('campaigns').catch(() => [] as Campaign[]),
       fetchRows<Creator>('creators').catch(() => [] as Creator[]),
       fetchRows<BrandInfluencer>('brand_influencers').catch(() => [] as BrandInfluencer[]),
+      fetchRows<DevCost>('dev_costs').catch(() => [] as DevCost[]),
       marketingSpendSummary().catch(() => [] as MarketingSpendSummary[]),
     ])
-    return { expenses, items, budgets, approvals, directory, departments, stores, projects, campaigns, creators, brandInfluencers, spendSummary }
+    return { expenses, items, budgets, approvals, directory, departments, stores, projects, campaigns, creators, brandInfluencers, devCosts, spendSummary }
   }
 
   const { data, loading, error, reload } = useAsync(load, [])
@@ -231,8 +234,13 @@ export default function Expenses() {
       label: `${b.name} · ${b.platform} · 报价 ${num(b.price_cny, 0)} CNY`,
       amount: Number(b.price_cny), currency: 'CNY',
     }))
-    return { ads, creator, brand }
-  }, [data, storeMap])
+    const dev = (data?.devCosts ?? []).map((c) => ({
+      id: c.id,
+      label: `${c.title} · ${projectMap.get(c.project_id)?.name ?? '开发项目'} · ${num(c.amount, 2)} ${c.currency}`,
+      amount: Number(c.amount), currency: c.currency,
+    }))
+    return { ads, creator, brand, dev }
+  }, [data, storeMap, projectMap])
 
   const sourceLabel = (e: FinanceExpense) => {
     const mod = e.source_module || 'manual'
@@ -324,8 +332,12 @@ export default function Expenses() {
     if (module === 'manual') return { ...base, source_module: 'manual', source_id: '' }
     if (!sourceId) return { ...base, source_module: module, source_id: '' }
     const opt = (sourceOptions[module as keyof typeof sourceOptions] ?? []).find((o) => o.id === sourceId)
-    const cat: ExpenseCategory = 'marketing'
-    const sub = module === 'ads' ? '广告投放' : module === 'creator' ? '达人佣金' : '站外红人'
+    const isDev = module === 'dev'
+    const cat: ExpenseCategory = isDev ? 'rd' : 'marketing'
+    const devCost = isDev ? (data?.devCosts ?? []).find((c) => c.id === sourceId) : undefined
+    const sub = isDev
+      ? (DEV_COST_SUBITEM[devCost?.category ?? 'other'] ?? '其他支出')
+      : module === 'ads' ? '广告投放' : module === 'creator' ? '达人佣金' : '站外红人'
     const name = opt?.label.split(' · ')[0] ?? '业务费用'
     return {
       ...base,
@@ -333,8 +345,9 @@ export default function Expenses() {
       source_id: sourceId,
       category: cat,
       subcategory: sub,
-      title: `${EXPENSE_SOURCE_META[module]?.label ?? '营销'} · ${name}`,
+      title: `${EXPENSE_SOURCE_META[module]?.label ?? '业务'} · ${name}`,
       currency: opt?.currency ?? base.currency,
+      project_id: isDev ? (devCost?.project_id ?? base.project_id) : base.project_id,
       items: [{ ...newItem(cat), item: sub, qty: '1', unit_price: String(opt?.amount ?? 0) }],
     }
   }
@@ -343,10 +356,10 @@ export default function Expenses() {
     setForm({ ...emptyForm(), code: genCode() })
   }
 
-  /** 从业务页跳转：?source=ads|creator|brand&source_id=xxx 预填来源 */
+  /** 从业务页跳转：?source=ads|creator|brand|dev&source_id=xxx 预填来源 */
   function openCreateFromSource(module: string, sourceId: string) {
     const mod = (module in EXPENSE_SOURCE_META ? module : 'manual') as ExpenseSourceModule
-    const base = { ...emptyForm(), code: genCode(), category: 'marketing' as ExpenseCategory }
+    const base = { ...emptyForm(), code: genCode(), category: (mod === 'dev' ? 'rd' : 'marketing') as ExpenseCategory }
     setForm(applySource(base, mod, sourceId))
     // 清掉 URL 参数，避免刷新重复触发
     setSearchParams({}, { replace: true })
@@ -852,13 +865,13 @@ export default function Expenses() {
         </div>
       ) : (
         <div className="space-y-3">
-          {/* 营销来源对照：广告 / 达人 / 站外品牌 的业务发生额 vs 费用归集额 */}
+          {/* 业务来源对照：广告 / 达人 / 站外品牌 / 产品开发 的业务发生额 vs 费用归集额 */}
           <div className="card p-4">
             <div className="flex items-center gap-2 mb-1">
               <Link2 className="w-4 h-4 text-brand-600" />
-              <h3 className="text-[13px] font-semibold text-ink-900">营销业务费用归集对照</h3>
+              <h3 className="text-[13px] font-semibold text-ink-900">业务费用归集对照</h3>
             </div>
-            <p className="text-[11px] text-ink-400 mb-3">广告投放、达人合作、站外品牌营销的发生额与已归集到费用管理的金额（各来源币种口径不同，仅作对照）</p>
+            <p className="text-[11px] text-ink-400 mb-3">广告投放、达人合作、站外品牌营销、产品开发费用的发生额与已归集到费用管理的金额（各来源币种口径不同，仅作对照）</p>
             {(data?.spendSummary ?? []).length === 0 ? (
               <p className="text-[12px] text-ink-400 py-6 text-center">暂无营销业务数据</p>
             ) : (
@@ -1007,7 +1020,11 @@ export default function Expenses() {
               </div>
               {form.source_module !== 'manual' && form.source_id && (
                 <button type="button" className="inline-flex items-center gap-1 text-[11px] text-brand-600 hover:underline"
-                  onClick={() => window.open(`${EXPENSE_SOURCE_META[form.source_module]?.path}?edit=${form.source_id}`, '_blank')}>
+                  onClick={() => {
+                    const base = EXPENSE_SOURCE_META[form.source_module]?.path ?? ''
+                    // path 可能已带 query（如 ?tab=ads），用 & 拼接避免双问号
+                    window.open(`${base}${base.includes('?') ? '&' : '?'}focus=${form.source_id}`, '_blank')
+                  }}>
                   <ExternalLink className="w-3 h-3" /> 查看该业务记录
                 </button>
               )}

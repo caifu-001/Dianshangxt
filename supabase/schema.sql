@@ -1082,9 +1082,9 @@ create table if not exists public.finance_expenses (
   payment_method text,
   voucher_no    text,
   note          text,
-  -- 业务来源：费用单可由广告投放/达人合作/站外品牌营销直接归集而来
-  source_module text not null default 'manual',  -- manual / ads / creator / brand
-  source_id     uuid,                             -- 关联 campaigns/creators/brand_* 记录
+  -- 业务来源：费用单可由广告投放/达人合作/站外品牌营销/产品开发费用直接归集而来
+  source_module text not null default 'manual',  -- manual / ads / creator / brand / dev
+  source_id     uuid,                             -- 关联 campaigns/creators/brand_*/dev_costs 记录
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
 );
@@ -1099,7 +1099,7 @@ alter table public.finance_expenses add column if not exists source_id uuid;
 do $$ begin
   alter table public.finance_expenses drop constraint if exists finance_expenses_source_module_chk;
   alter table public.finance_expenses add constraint finance_expenses_source_module_chk
-    check (source_module in ('manual','ads','creator','brand'));
+    check (source_module in ('manual','ads','creator','brand','dev'));
 end $$;
 -- 补列完成后再建索引
 create index if not exists idx_finance_expenses_source on public.finance_expenses(source_module, source_id);
@@ -1284,11 +1284,12 @@ as $$
 $$;
 
 -- -------------------------------------------------------------
---  营销费用来源汇总：把广告投放 / 达人合作 / 站外品牌营销的
---  「业务发生额」与在费用管理里「已归集的费用」放在一起对照，
---  让三块营销投入与财务台账数据互通。
---  业务金额保留原始口径（广告多为外币、红人报价为 CNY），
+--  业务费用来源汇总：把广告投放 / 达人合作 / 站外品牌营销 /
+--  产品开发费用的「业务发生额」与在费用管理里「已归集的费用」
+--  放在一起对照，让业务投入与财务台账数据互通。
+--  业务金额保留原始口径（广告多为外币、红人报价与开发费用多为 CNY），
 --  已归集金额取费用单 amount（以费用单币种为准），前端标注币种。
+--  函数名保留 marketing_spend_summary 以兼容既有前端调用。
 --  注意：这是 LANGUAGE sql 函数，创建时即解析函数体，必须放在
 --  company_id 补列（do 块）及 in_company / is_active_user 之后。
 -- -------------------------------------------------------------
@@ -1315,12 +1316,17 @@ as $$
     select coalesce(sum(price_cny), 0) as amt, count(*)::bigint as cnt
       from public.brand_influencers where public.in_company(company_id)
   ),
+  dev as (
+    -- 产品开发费用：打样 / 模具 / 认证 / 设计 / 物流等投入，原币口径合计
+    select coalesce(sum(amount), 0) as amt, count(*)::bigint as cnt
+      from public.dev_costs where public.in_company(company_id)
+  ),
   recorded as (
     select source_module,
            coalesce(sum(amount), 0) as amt,
            count(*)::bigint as cnt
       from public.finance_expenses
-     where source_module in ('ads', 'creator', 'brand') and public.in_company(company_id)
+     where source_module in ('ads', 'creator', 'brand', 'dev') and public.in_company(company_id)
      group by source_module
   )
   select v.mod, v.label, v.biz_amt, coalesce(r.amt, 0), v.biz_cnt, coalesce(r.cnt, 0)
@@ -1333,6 +1339,9 @@ as $$
       union all
       select 'brand'::text, '站外品牌营销'::text,
              (select amt from brand), (select cnt from brand)
+      union all
+      select 'dev'::text, '产品开发费用'::text,
+             (select amt from dev), (select cnt from dev)
     ) v
     left join recorded r on r.source_module = v.mod
    where public.is_active_user()

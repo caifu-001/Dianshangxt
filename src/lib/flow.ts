@@ -326,15 +326,26 @@ export const EXPENSE_SUB_ITEMS: Record<string, string[]> = {
   other: ['税费', '头程物流', '仓储费', '其他支出'],
 }
 
-/** 费用来源模块元数据：广告投放 / 达人合作 / 站外品牌营销 / 手工记账 */
+/** 费用来源模块元数据：广告投放 / 达人合作 / 站外品牌营销 / 产品开发 / 手工记账 */
 export const EXPENSE_SOURCE_META: Record<string, { label: string; short: string; tone: string; path: string }> = {
   manual:  { label: '手工记账', short: '手工', tone: 'bg-ink-100 text-ink-600', path: '' },
   ads:     { label: '广告投放', short: '广告', tone: 'bg-brand-50 text-brand-700', path: '/onsite-brand?tab=ads' },
   creator: { label: '达人合作', short: '达人', tone: 'bg-violet-50 text-violet-700', path: '/onsite-brand?tab=creators' },
   brand:   { label: '站外品牌营销', short: '品牌', tone: 'bg-orange-50 text-orange-700', path: '/brand' },
+  dev:     { label: '产品开发', short: '开发', tone: 'bg-emerald-50 text-emerald-700', path: '/development?view=costs' },
 }
 
-/** 拉取营销费用来源汇总（业务发生额 vs 已归集费用） */
+/** 产品开发费用类别 → 费用管理明细科目（研发费用下的标准科目） */
+export const DEV_COST_SUBITEM: Record<string, string> = {
+  mold: '模具治具',
+  sample: '打样费',
+  cert: '认证检测',
+  design: '设计版权',
+  logistics: '头程物流',
+  other: '其他支出',
+}
+
+/** 拉取业务费用来源汇总（业务发生额 vs 已归集费用，含广告/达人/品牌/产品开发） */
 export function marketingSpendSummary() {
   return callRpc<import('./types').MarketingSpendSummary[]>('marketing_spend_summary', {})
 }
