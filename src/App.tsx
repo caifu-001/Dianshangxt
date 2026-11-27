@@ -29,6 +29,7 @@ import Performance from './pages/Performance'
 import Settings from './pages/Settings'
 import Companies from './pages/Companies'
 import SystemLogs from './pages/SystemLogs'
+import DataConnect from './pages/DataConnect'
 
 /** 平台级页面守卫：公司管理只有全局超管能进，公司内普通管理员也看不到入口 */
 function RequireSuperAdmin({ children }: { children: ReactNode }) {
@@ -176,6 +177,7 @@ function AppRoutes() {
       <Route element={<AppLayout />}>
         <Route index element={<Dashboard />} />
         <Route path="stores" element={<RequirePermission perm="stores.view"><Stores /></RequirePermission>} />
+        <Route path="data-connect" element={<RequirePermission perm="stores.view"><DataConnect /></RequirePermission>} />
         <Route path="products" element={<RequirePermission perm="products.view"><Products /></RequirePermission>} />
         <Route path="development" element={<RequirePermission perm="dev.view"><Development /></RequirePermission>} />
         <Route path="orders" element={<RequirePermission perm="orders.view"><Orders /></RequirePermission>} />

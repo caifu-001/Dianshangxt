@@ -555,13 +555,18 @@ VITE_SUPABASE_KEY=sb_publishable_vBOpo9IQaKPg4ACt_nLopg_oiJQAKhy
 详见 [`docs/AMAZON_SYNC_PLAN.md`](docs/AMAZON_SYNC_PLAN.md)（技术方案）与
 [`supabase/functions/README.md`](supabase/functions/README.md)（部署与密钥配置）。
 
+**给入驻公司的可视化入口**：左侧导航「经营 → 数据接入中心」（`/data-connect`）。
+页面把接入流程做成 4 步向导（创建店铺 → 授权连接 → 首次同步 → 查看数据），并明确说明
+**账号密码只在 Amazon 官方授权页输入，本系统不接触、不存储密码**；提供连接/解除/立即同步、
+同步状态与最近同步记录表格。仅公司管理员可操作，普通成员只读。设置页的「平台账号连接」卡片保留简版，并链接到此中心。
+
 **当前状态：代码已就位，Amazon 应用凭证未配置**——功能入口会提示「自动同步尚未启用」，其余模块不受影响。
 拿到 Amazon 公共应用资质后：
 
 1. Supabase SQL Editor 执行 `supabase/platform_sync_schema.sql`（建连接表 / 日志表 / RLS / RPC）
 2. 部署 4 个 Edge Functions：`amazon-oauth-start` / `amazon-oauth-callback` / `amazon-sync` / `amazon-disconnect`
 3. 在 Supabase Edge Functions Secrets 填入 LWA / AWS / 加密密钥（清单见 functions README）
-4. 系统设置 →「平台账号连接」→ 连接 Amazon 店铺（仅公司管理员可见）
+4. 左侧导航「经营 → 数据接入中心」→ 连接 Amazon 店铺（仅公司管理员可操作）
 5. 定时任务 `.github/workflows/amazon-sync.yml` 每 30 分钟自动同步，也可在设置页手动点「立即同步」。
    workflow 已内置默认值，**无需配置 GitHub Secrets 即可运行**；如需覆盖，可在仓库 Settings → Secrets and variables → Actions 建同名 Secret。
 

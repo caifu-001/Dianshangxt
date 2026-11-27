@@ -202,6 +202,9 @@ export default function PlatformConnections() {
         <h3 className="text-[13.5px] font-semibold text-ink-900">平台账号连接</h3>
         <Badge tone="gray">Amazon</Badge>
         {!canManage && <Badge tone="gray">只读</Badge>}
+        <Link to="/data-connect" className="ml-auto inline-flex items-center gap-1 text-[11px] text-brand-600 hover:underline">
+          打开数据接入中心 <ExternalLink className="w-3 h-3" />
+        </Link>
       </div>
       <div className="p-4">
         {functionStatus === 'missing' ? (
