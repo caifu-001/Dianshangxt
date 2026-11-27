@@ -562,8 +562,8 @@ VITE_SUPABASE_KEY=sb_publishable_vBOpo9IQaKPg4ACt_nLopg_oiJQAKhy
 2. 部署 4 个 Edge Functions：`amazon-oauth-start` / `amazon-oauth-callback` / `amazon-sync` / `amazon-disconnect`
 3. 在 Supabase Edge Functions Secrets 填入 LWA / AWS / 加密密钥（清单见 functions README）
 4. 系统设置 →「平台账号连接」→ 连接 Amazon 店铺（仅公司管理员可见）
-5. GitHub 仓库 Settings → Secrets 加入 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SYNC_CRON_SECRET`，
-   定时任务 `.github/workflows/amazon-sync.yml` 每 30 分钟自动同步，也可在设置页手动点「立即同步」
+5. 定时任务 `.github/workflows/amazon-sync.yml` 每 30 分钟自动同步，也可在设置页手动点「立即同步」。
+   workflow 已内置默认值，**无需配置 GitHub Secrets 即可运行**；如需覆盖，可在仓库 Settings → Secrets and variables → Actions 建同名 Secret。
 
 安全边界：refresh token 用 AES-GCM 加密存库、密钥只在服务端；不采集买家个人信息；
 费用字段暂留 0（避免污染利润生成列），后续接 Financial Events 再精确回填。
