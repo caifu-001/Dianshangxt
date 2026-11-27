@@ -2629,8 +2629,13 @@ create policy "emp_events_select" on public.employee_events
   using (
     profile_id = auth.uid()
     or (
-      public.in_company(company_id)
-      and (public.has_permission('hr.view') or public.has_permission('account.manage'))
+      -- 平台超管：全局可见，不受「当前管理视角」收敛，能看到所有公司的变动记录
+      public.is_super_admin()
+      -- 公司管理员 / HR：仅限本公司，防止跨公司反查他人档案
+      or (
+        public.in_company(company_id)
+        and (public.has_permission('hr.view') or public.has_permission('account.manage'))
+      )
     )
   );
 

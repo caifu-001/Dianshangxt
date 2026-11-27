@@ -9,6 +9,7 @@
 --   3. 公司管理员可移除本公司成员档案（不能删自己 / 平台超管账号）
 --   4. 公司管理员可查看 / 清理本公司演示数据
 --   5. 修复权限申请列表跨公司泄露（RLS 补租户过滤），同时保留平台超管跨公司看/批的能力
+--   6. 人员变动记录：超管可见所有公司（原先被 in_company 收敛到默认公司，导致看不到全量）
 --
 --  仍保留超管专属（平台级，不下放）：
 --   创建/维护公司、审核公司入驻、跨公司调人、切换管理视角、
@@ -371,6 +372,22 @@ create policy "access_req_update_staff" on public.access_requests
   with check (
     public.has_permission('account.manage')
     and (public.is_super_admin() or public.in_company(company_id))
+  );
+
+-- ---------- 7. 人员变动记录：超管可见所有公司，公司管理员仍限本公司 ----------
+-- 背景：emp_events_select 原先只有 in_company 过滤，而 in_company 会把超管收敛到
+-- 「当前管理视角」（默认公司），导致超管在权限流程页只看到默认公司的变动记录，
+-- 表现为「超管看不到所有」。这里给超管开全局例外，普通管理员/HR 仍严格限本公司。
+drop policy if exists "emp_events_select" on public.employee_events;
+create policy "emp_events_select" on public.employee_events
+  for select to authenticated
+  using (
+    profile_id = auth.uid()
+    or public.is_super_admin()
+    or (
+      public.in_company(company_id)
+      and (public.has_permission('hr.view') or public.has_permission('account.manage'))
+    )
   );
 
 -- ---------- 自检：执行完立刻看策略是否落地（应看到 2 条，using 里含 is_super_admin） ----------
