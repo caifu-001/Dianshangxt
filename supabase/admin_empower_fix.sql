@@ -374,15 +374,18 @@ create policy "access_req_update_staff" on public.access_requests
   );
 
 -- ---------- 自检：执行完立刻看策略是否落地（应看到 2 条，using 里含 is_super_admin） ----------
+-- 兼容写法：直接读 pg_policy 系统表，避免 pg_policies 视图列名在 PG15+ 改成 qual 导致报错
 select
-  policyname,
-  cmd as command,
-  using_expression
-from pg_policies
-where schemaname = 'public'
-  and tablename  = 'access_requests'
-  and policyname in ('access_req_select', 'access_req_update_staff')
-order by policyname;
+  p.polname                       as policyname,
+  trim(p.polcmd::text)            as command,
+  pg_get_expr(p.polqual, c.oid)   as using_expression
+from pg_policy p
+join pg_class c      on c.oid = p.polrelid
+join pg_namespace n  on n.oid = c.relnamespace
+where n.nspname = 'public'
+  and c.relname = 'access_requests'
+  and p.polname in ('access_req_select', 'access_req_update_staff')
+order by p.polname;
 
 -- 若上面返回 2 行、且 using_expression 里能看到 is_super_admin，说明修复已真正生效。
 -- 本脚本可安全重复执行（幂等）。

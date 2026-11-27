@@ -25,16 +25,18 @@ select
   public.has_permission('account.manage')  as anon_can_manage;
 
 -- ③ access_requests 表上当前生效的 RLS 策略（看 using / with_check 是否含 is_super_admin 例外）
+-- 兼容写法：直接读 pg_policy 系统表，避免 pg_policies 视图列名在 PG15+ 改成 qual 导致报错
 select
-  policyname,
-  cmd        as command,
-  roles,
-  using_expression,
-  with_check
-from pg_policies
-where schemaname = 'public'
-  and tablename  = 'access_requests'
-order by policyname;
+  p.polname                                    as policyname,
+  trim(p.polcmd::text)                         as command,
+  pg_get_expr(p.polqual, c.oid)                as using_expression,
+  pg_get_expr(p.polwithcheck, c.oid)           as with_check
+from pg_policy p
+join pg_class c      on c.oid = p.polrelid
+join pg_namespace n  on n.oid = c.relnamespace
+where n.nspname = 'public'
+  and c.relname = 'access_requests'
+order by p.polname;
 
 -- ④ access_requests 是否有 company_id 列（缺列会导致策略引用 company_id 时失效）
 select
