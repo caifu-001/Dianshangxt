@@ -549,29 +549,31 @@ VITE_SUPABASE_KEY=sb_publishable_vBOpo9IQaKPg4ACt_nLopg_oiJQAKhy
 `publishable` / `anon` key 按设计是公开的，安全性由 RLS 保证：**数据范围由权限码决定，越权请求会被 Postgres 拒绝**。
 切勿把 `service_role` 密钥放进前端。
 
-## Amazon 平台数据自动同步（凭证待配置）
+## 平台数据自动同步（Amazon + TikTok Shop，凭证待配置）
 
-系统支持各公司管理员用 OAuth 授权自己的 Amazon 店铺，自动同步订单 / 商品 / FBA 库存到现有业务表。
-详见 [`docs/AMAZON_SYNC_PLAN.md`](docs/AMAZON_SYNC_PLAN.md)（技术方案）与
-[`supabase/functions/README.md`](supabase/functions/README.md)（部署与密钥配置）。
+系统支持各公司管理员用 OAuth 授权自己的店铺，**Amazon 与 TikTok Shop 均已实现**，自动同步订单 / 商品 / 库存到现有业务表。
+详见 [`docs/AMAZON_SYNC_PLAN.md`](docs/AMAZON_SYNC_PLAN.md)（Amazon 技术方案）、
+[`supabase/functions/README.md`](supabase/functions/README.md)（Amazon 部署）与
+[`supabase/functions/manual/README-TIKTOK.md`](supabase/functions/manual/README-TIKTOK.md)（TikTok 部署）。
 
-**给入驻公司的可视化入口**：左侧导航「经营 → 数据接入中心」（`/data-connect`）。
+**给入驻公司的可视化入口**：左侧导航「经营 → 数据接入中心」（`/data-connect`），顶部可切换 Amazon / TikTok Shop。
 页面把接入流程做成 4 步向导（创建店铺 → 授权连接 → 首次同步 → 查看数据），并明确说明
-**账号密码只在 Amazon 官方授权页输入，本系统不接触、不存储密码**；提供连接/解除/立即同步、
-同步状态与最近同步记录表格。仅公司管理员可操作，普通成员只读。设置页的「平台账号连接」卡片保留简版，并链接到此中心。
+**账号密码只在平台官方授权页输入，本系统不接触、不存储密码**；两个平台各自的连接/解除/立即同步、
+同步状态与最近同步记录表格互不干扰。仅公司管理员可操作，普通成员只读。设置页的「平台账号连接」卡片保留 Amazon 简版，并链接到此中心。
 
-**当前状态：代码已就位，Amazon 应用凭证未配置**——功能入口会提示「自动同步尚未启用」，其余模块不受影响。
-拿到 Amazon 公共应用资质后：
+**当前状态：代码已就位，两个平台的应用凭证均未配置**——功能入口会提示「自动同步尚未启用」，其余模块不受影响。
+拿到对应平台资质后：
 
-1. Supabase SQL Editor 执行 `supabase/platform_sync_schema.sql`（建连接表 / 日志表 / RLS / RPC）
-2. 部署 4 个 Edge Functions：`amazon-oauth-start` / `amazon-oauth-callback` / `amazon-sync` / `amazon-disconnect`
-3. 在 Supabase Edge Functions Secrets 填入 LWA / AWS / 加密密钥（清单见 functions README）
-4. 左侧导航「经营 → 数据接入中心」→ 连接 Amazon 店铺（仅公司管理员可操作）
-5. 定时任务 `.github/workflows/amazon-sync.yml` 每 30 分钟自动同步，也可在设置页手动点「立即同步」。
+1. Supabase SQL Editor 依次执行 `supabase/platform_sync_schema.sql`、`supabase/tiktok_sync_schema.sql`（建连接表 / 放开 region 约束 / 日志表 / RLS / RPC）
+2. 部署 8 个 Edge Functions：`amazon-oauth-start/callback/sync/disconnect` 与 `tiktok-oauth-start/callback/sync/disconnect`
+   （网页控制台可用 `supabase/functions/manual/` 下两个平台的自包含单文件直接粘贴）
+3. 在 Supabase Edge Functions Secrets 填入各平台应用凭证 + 共用加密密钥（清单见对应 README）
+4. 左侧导航「经营 → 数据接入中心」→ 切到对应平台 → 连接店铺（仅公司管理员可操作）
+5. 定时任务 `.github/workflows/amazon-sync.yml` 每 30 分钟**依次同步两个平台**，也可在数据接入中心手动点「立即同步」。
    workflow 已内置默认值，**无需配置 GitHub Secrets 即可运行**；如需覆盖，可在仓库 Settings → Secrets and variables → Actions 建同名 Secret。
 
-安全边界：refresh token 用 AES-GCM 加密存库、密钥只在服务端；不采集买家个人信息；
-费用字段暂留 0（避免污染利润生成列），后续接 Financial Events 再精确回填。
+安全边界：refresh token 用 AES-GCM 加密存库、密钥只在服务端；不采集买家个人信息（TikTok 访问令牌 7 天自动刷新）；
+费用字段暂留 0（避免污染利润生成列），后续接财务接口再精确回填。
 
 ## 数据模型
 
@@ -664,8 +666,11 @@ npm run preview    # 预览构建产物
 ```
 ├─ supabase/
 │  ├─ schema.sql            # 数据库初始化脚本（建表 + RLS + 触发器）
-│  ├─ platform_sync_schema.sql  # Amazon 同步相关表 / RPC（凭证配置时执行）
-│  └─ functions/            # Edge Functions：Amazon OAuth 与数据同步
+│  ├─ platform_sync_schema.sql  # 同步基础表 / RPC（凭证配置时执行）
+│  ├─ tiktok_sync_schema.sql # TikTok 增量：放开 region 约束（凭证配置时执行）
+│  └─ functions/            # Edge Functions：Amazon / TikTok OAuth 与数据同步
+│     ├─ _shared/           # 公共模块（含 tiktok.ts HMAC 签名与 API 封装）
+│     └─ manual/            # 网页控制台可粘贴的自包含单文件 + 部署指南
 ├─ docs/
 │  └─ AMAZON_SYNC_PLAN.md   # Amazon 数据同步技术方案
 ├─ src/

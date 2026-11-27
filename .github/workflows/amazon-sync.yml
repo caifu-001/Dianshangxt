@@ -1,4 +1,4 @@
-name: Amazon 数据同步（每 30 分钟）
+name: 店铺数据同步 Amazon + TikTok（每 30 分钟）
 
 on:
   schedule:
@@ -19,19 +19,26 @@ jobs:
       SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || 'sb_publishable_vBOpo9IQaKPg4ACt_nLopg_oiJQAKhy' }}
       SYNC_CRON_SECRET: ${{ secrets.SYNC_CRON_SECRET || '8H4giW38Pp5nAe71992AngENfhjoO9H8gQGP3pcHO0g' }}
     steps:
-      - name: 调用同步函数
+      - name: 调用同步函数（Amazon + TikTok）
         run: |
-          RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST \
-            "${SUPABASE_URL}/functions/v1/amazon-sync" \
-            -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
-            -H "x-cron-secret: ${SYNC_CRON_SECRET}" \
-            -H "Content-Type: application/json" \
-            -d '{}')
-          BODY=$(echo "$RESPONSE" | head -n -1)
-          CODE=$(echo "$RESPONSE" | tail -n 1)
-          echo "HTTP $CODE"
-          echo "$BODY"
-          # 未配置凭证（503）不算失败，只是提醒尚未启用
-          if [ "$CODE" != "200" ] && [ "$CODE" != "503" ]; then
-            exit 1
-          fi
+          FAILED=0
+          for FN in amazon-sync tiktok-sync; do
+            echo "===== $FN ====="
+            RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST \
+              "${SUPABASE_URL}/functions/v1/${FN}" \
+              -H "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+              -H "x-cron-secret: ${SYNC_CRON_SECRET}" \
+              -H "Content-Type: application/json" \
+              -d '{}')
+            BODY=$(echo "$RESPONSE" | head -n -1)
+            CODE=$(echo "$RESPONSE" | tail -n 1)
+            echo "HTTP $CODE"
+            echo "$BODY"
+            # 未配置凭证（503）不算失败，只是提醒尚未启用；404 是函数没部署，单独提示
+            if [ "$CODE" = "404" ]; then
+              echo "::warning::$FN 未部署（404），跳过"
+            elif [ "$CODE" != "200" ] && [ "$CODE" != "503" ]; then
+              FAILED=1
+            fi
+          done
+          exit $FAILED

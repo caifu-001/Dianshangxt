@@ -1,8 +1,8 @@
 /**
  * 数据接入中心：给入驻跨境公司管理员使用的可视化接入向导。
  *
- * 核心原则：账号密码只在 Amazon 官方授权页输入，本系统永不接触、永不存储。
- * 这里只负责引导「去哪输、怎么输、授完回来、同步状态怎么看」。
+ * 核心原则：账号密码只在平台官方授权页输入，本系统永不接触、永不存储。
+ * 支持 Amazon / TikTok Shop，两者共用同一套数据库表与向导，仅函数与文案不同。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -30,9 +30,44 @@ import {
 import { Badge, Button, ConfirmDialog, useToast } from '../components/ui'
 import { callRpc, fetchRows, invokeFunction } from '../lib/db'
 import { SUPABASE_KEY, SUPABASE_URL } from '../lib/supabase'
-import { fmtDateTime } from '../lib/utils'
+import { cn, fmtDateTime } from '../lib/utils'
 import { useAuth } from '../context/AuthContext'
-import { cn } from '../lib/utils'
+
+/* ------------------------------ 平台配置 ------------------------------ */
+
+type PlatformKey = 'amazon' | 'tiktok'
+
+interface PlatformCfg {
+  key: PlatformKey
+  label: string
+  fnPrefix: string
+  authPage: string
+  stockLabel: string
+  docPath: string
+  regionLabel: Record<string, string>
+}
+
+const PLATFORM_CONFIG: Record<PlatformKey, PlatformCfg> = {
+  amazon: {
+    key: 'amazon',
+    label: 'Amazon',
+    fnPrefix: 'amazon',
+    authPage: 'Amazon 官方授权页',
+    stockLabel: 'FBA 库存',
+    docPath: 'supabase/functions/manual/README.md',
+    regionLabel: { na: '北美', eu: '欧洲', fe: '远东' },
+  },
+  tiktok: {
+    key: 'tiktok',
+    label: 'TikTok Shop',
+    fnPrefix: 'tiktok',
+    authPage: 'TikTok Shop 官方授权页',
+    stockLabel: '店铺库存',
+    docPath: 'supabase/functions/manual/README-TIKTOK.md',
+    regionLabel: { us: '美国站', global: '全球站' },
+  },
+}
+const PLATFORM_KEYS: PlatformKey[] = ['amazon', 'tiktok']
 
 /* ------------------------------ 类型 ------------------------------ */
 
@@ -101,7 +136,6 @@ const RUN_META: Record<string, { label: string; tone: 'green' | 'red' | 'amber' 
 const JOB_LABEL: Record<string, string> = {
   orders: '订单', products: '商品', inventory: '库存', financial: '财务', all: '全部',
 }
-const REGION_LABEL: Record<string, string> = { na: '北美', eu: '欧洲', fe: '远东' }
 
 /* ------------------------------ 页面 ------------------------------ */
 
@@ -109,6 +143,9 @@ export default function DataConnect() {
   const { can } = useAuth()
   const { push } = useToast()
   const canManage = can('stores.edit')
+
+  const [activePlatform, setActivePlatform] = useState<PlatformKey>('amazon')
+  const cfg = PLATFORM_CONFIG[activePlatform]
 
   const [connections, setConnections] = useState<Connection[]>([])
   const [stores, setStores] = useState<StoreRow[]>([])
@@ -123,6 +160,8 @@ export default function DataConnect() {
 
   const load = useCallback(async () => {
     setLoading(true)
+    setFnStatus('checking')
+    setConfigMissing([])
     const [connRes, storeRes, runRes] = await Promise.allSettled([
       callRpc<Connection[]>('list_platform_connections'),
       fetchRows<StoreRow>('stores', { columns: 'id,name,platform,marketplace,status' }),
@@ -137,14 +176,14 @@ export default function DataConnect() {
       setConnections([])
       push(`读取连接状态失败：${connRes.reason instanceof Error ? connRes.reason.message : String(connRes.reason)}`, 'error')
     }
-    if (storeRes.status === 'fulfilled') setStores(storeRes.value.filter((s) => s.platform === 'amazon'))
+    if (storeRes.status === 'fulfilled') setStores(storeRes.value)
     if (runRes.status === 'fulfilled') setRuns(runRes.value)
     setLoading(false)
 
     // 无副作用探测服务端函数：空 body 时 oauth-start 先校验凭证即返回。
     void (async () => {
       try {
-        const res = await fetch(`${SUPABASE_URL}/functions/v1/amazon-oauth-start`, {
+        const res = await fetch(`${SUPABASE_URL}/functions/v1/${cfg.fnPrefix}-oauth-start`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
           body: '{}',
@@ -159,7 +198,7 @@ export default function DataConnect() {
         setFnStatus('ok')
       } catch { setFnStatus('missing') }
     })()
-  }, [push])
+  }, [push, cfg.fnPrefix])
 
   useEffect(() => { void load() }, [load])
 
@@ -167,7 +206,7 @@ export default function DataConnect() {
     const params = new URLSearchParams(window.location.search)
     const oauth = params.get('oauth')
     if (!oauth) return
-    push(params.get('msg') || (oauth === 'ok' ? 'Amazon 店铺已连接，正在同步' : '授权未完成'), oauth === 'ok' ? 'success' : 'error')
+    push(params.get('msg') || (oauth === 'ok' ? '店铺已连接，正在同步' : '授权未完成'), oauth === 'ok' ? 'success' : 'error')
     window.history.replaceState({}, '', window.location.pathname)
     void load()
   }, [push, load])
@@ -186,7 +225,7 @@ export default function DataConnect() {
   async function startConnect(storeId: string) {
     setConnectingStore(storeId)
     try {
-      const res = await invokeFunction<{ ok: boolean; url?: string; message?: string }>('amazon-oauth-start', { store_id: storeId })
+      const res = await invokeFunction<{ ok: boolean; url?: string; message?: string }>(`${cfg.fnPrefix}-oauth-start`, { store_id: storeId })
       if (!res.ok) throw new Error(res.message ?? '发起授权失败')
       if (!res.url) throw new Error('未返回授权地址')
       window.location.href = res.url
@@ -197,7 +236,7 @@ export default function DataConnect() {
   async function runSync(connectionId?: string) {
     setSyncing(connectionId ?? '__all__')
     try {
-      const res = await invokeFunction<SyncResult>('amazon-sync', connectionId ? { connection_id: connectionId } : {})
+      const res = await invokeFunction<SyncResult>(`${cfg.fnPrefix}-sync`, connectionId ? { connection_id: connectionId } : {})
       if (!res.ok) throw new Error(res.message ?? '同步失败')
       const failed = res.results?.filter((r) => r.status === 'failed') ?? []
       if (failed.length) push(`同步完成，但有 ${failed.length} 个连接失败：${failed[0].error ?? ''}`, 'error')
@@ -210,36 +249,55 @@ export default function DataConnect() {
   async function doDisconnect() {
     if (!disconnectTarget) return
     try {
-      await invokeFunction('amazon-disconnect', { connection_id: disconnectTarget.id })
+      await invokeFunction(`${cfg.fnPrefix}-disconnect`, { connection_id: disconnectTarget.id })
       push('已解除授权，历史同步数据保留')
       setDisconnectTarget(null)
       await load()
     } catch (err) { push(err instanceof Error ? err.message : '解除失败', 'error') }
   }
 
+  /* ------------------------ 当前平台的数据视图 ------------------------ */
+  const platformConnections = useMemo(
+    () => connections.filter((c) => c.platform === activePlatform),
+    [connections, activePlatform],
+  )
+  const platformStores = useMemo(
+    () => stores.filter((s) => s.platform === activePlatform),
+    [stores, activePlatform],
+  )
+  const platformConnIds = useMemo(
+    () => new Set(platformConnections.map((c) => c.id)),
+    [platformConnections],
+  )
+  const platformRuns = useMemo(
+    () => runs.filter((r) => !r.connection_id || platformConnIds.has(r.connection_id)),
+    [runs, platformConnIds],
+  )
+
   /* ------------------------ 向导进度计算 ------------------------ */
   const connectedStoreIds = useMemo(
-    () => new Set(connections.filter((c) => c.status !== 'revoked').map((c) => c.store_id)),
-    [connections],
+    () => new Set(platformConnections.filter((c) => c.status !== 'revoked').map((c) => c.store_id)),
+    [platformConnections],
   )
   const availableStores = useMemo(
-    () => stores.filter((s) => s.status === 'active' && !connectedStoreIds.has(s.id)),
-    [stores, connectedStoreIds],
+    () => platformStores.filter((s) => s.status === 'active' && !connectedStoreIds.has(s.id)),
+    [platformStores, connectedStoreIds],
   )
-  const hasStore = stores.length > 0
-  const hasConnection = connections.some((c) => c.status !== 'revoked')
-  const hasSuccessRun = runs.some((r) => r.status === 'ok' || r.status === 'partial')
+  const hasStore = platformStores.length > 0
+  const hasConnection = platformConnections.some((c) => c.status !== 'revoked')
+  const hasSuccessRun = platformRuns.some((r) => r.status === 'ok' || r.status === 'partial')
 
   const steps = [
-    { done: hasStore, title: '创建店铺档案', desc: '在「店铺管理」添加您的 Amazon 店铺与站点' },
-    { done: hasConnection, title: '授权连接店铺', desc: '跳转 Amazon 官方页面登录并同意授权，密码不经过本系统' },
-    { done: hasConnection && hasSuccessRun, title: '首次数据同步', desc: '授权后自动拉取订单、商品与 FBA 库存' },
+    { done: hasStore, title: '创建店铺档案', desc: `在「店铺管理」添加您的 ${cfg.label} 店铺与站点` },
+    { done: hasConnection, title: '授权连接店铺', desc: `跳转 ${cfg.label} 官方页面登录并同意授权，密码不经过本系统` },
+    { done: hasConnection && hasSuccessRun, title: '首次数据同步', desc: `授权后自动拉取订单、商品与${cfg.stockLabel}` },
     { done: hasSuccessRun, title: '查看经营数据', desc: '同步数据进入订单、商品、库存，自动生成利润与绩效' },
   ]
   const completedSteps = steps.filter((s) => s.done).length
 
   const serviceReady = fnStatus === 'ok'
-  const storeName = (id: string | null) => stores.find((s) => s.id === id)?.name ?? '已解除的店铺'
+  const storeName = (id: string | null) => platformStores.find((s) => s.id === id)?.name ?? '已解除的店铺'
+  const regionLabel = (r: string) => cfg.regionLabel[r] ?? r
 
   return (
     <div className="space-y-4">
@@ -249,11 +307,10 @@ export default function DataConnect() {
           <div className="flex items-center gap-2">
             <PlugZap className="w-5 h-5 text-brand-600" />
             <h1 className="text-[17px] font-semibold text-ink-900">数据接入中心</h1>
-            <Badge tone="blue">Amazon</Badge>
             {!canManage && <Badge tone="gray">只读</Badge>}
           </div>
           <p className="text-[12px] text-ink-500 mt-1">
-            连接店铺后，订单、商品、FBA 库存自动同步到系统，利润与绩效随之更新。全程无需手工导入 Excel。
+            连接店铺后，订单、商品、库存自动同步到系统，利润与绩效随之更新。全程无需手工导入 Excel。
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -266,6 +323,23 @@ export default function DataConnect() {
         </div>
       </div>
 
+      {/* 平台切换 */}
+      <div className="inline-flex rounded-lg border border-ink-200 bg-ink-50 p-0.5">
+        {PLATFORM_KEYS.map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => { setActivePlatform(key); setDisconnectTarget(null) }}
+            className={cn(
+              'px-3.5 py-1.5 rounded-md text-[12px] font-medium transition-colors',
+              key === activePlatform ? 'bg-white text-brand-700 shadow-sm border border-brand-200' : 'text-ink-500 hover:text-ink-700',
+            )}
+          >
+            {PLATFORM_CONFIG[key].label}
+          </button>
+        ))}
+      </div>
+
       {/* 账号密码说明：最重要的一块，放在最上面 */}
       <div className="rounded-xl border border-brand-200 bg-brand-50/60 p-4">
         <div className="flex items-start gap-3">
@@ -275,8 +349,8 @@ export default function DataConnect() {
           <div className="min-w-0 flex-1">
             <h2 className="text-[13.5px] font-semibold text-ink-900">账号密码在哪里输入？</h2>
             <p className="text-[12px] text-ink-600 mt-1 leading-relaxed">
-              <strong>在本系统里不输入账号密码。</strong>Amazon 不允许第三方系统收集卖家密码。点下方「连接店铺」后，
-              浏览器会跳转到 <strong>Amazon 官方授权页</strong>，您在那里登录自己的卖家账号并点击「同意授权」，
+              <strong>在本系统里不输入账号密码。</strong>{cfg.label} 不允许第三方系统收集卖家密码。点下方「连接店铺」后，
+              浏览器会跳转到 <strong>{cfg.authPage}</strong>，您在那里登录自己的卖家账号并点击「同意授权」，
               然后自动回到本系统开始同步。
             </p>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
@@ -287,7 +361,7 @@ export default function DataConnect() {
               <ChevronRight className="w-3 h-3 text-ink-400" />
               <span className="inline-flex items-center gap-1 rounded-md bg-white border border-brand-200 px-2 py-1 text-ink-600">
                 <span className="w-4 h-4 rounded-full bg-brand-600 text-white flex items-center justify-center text-[9px] font-bold">2</span>
-                在 Amazon 页面输账号密码
+                在 {cfg.label} 页面输账号密码
               </span>
               <ChevronRight className="w-3 h-3 text-ink-400" />
               <span className="inline-flex items-center gap-1 rounded-md bg-white border border-brand-200 px-2 py-1 text-ink-600">
@@ -311,7 +385,7 @@ export default function DataConnect() {
       {/* 服务端状态提示 */}
       {fnStatus === 'missing' && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-[12px] text-rose-800">
-          <div className="flex items-center gap-1.5 font-medium mb-1"><AlertTriangle className="w-4 h-4" />服务端同步服务尚未部署</div>
+          <div className="flex items-center gap-1.5 font-medium mb-1"><AlertTriangle className="w-4 h-4" />{cfg.label} 同步服务尚未部署</div>
           <p className="leading-relaxed">
             代码已就绪，但 4 个 Edge Functions 还没部署到 Supabase，所以暂时无法连接店铺。
             请系统管理员在 Supabase 控制台 → Edge Functions 部署后刷新本页。其它功能不受影响。
@@ -320,24 +394,24 @@ export default function DataConnect() {
       )}
       {fnStatus === 'unconfigured' && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-[12px] text-amber-800">
-          <div className="flex items-center gap-1.5 font-medium mb-1"><Info className="w-4 h-4" />同步服务已部署，等待配置 Amazon 应用凭证</div>
+          <div className="flex items-center gap-1.5 font-medium mb-1"><Info className="w-4 h-4" />同步服务已部署，等待配置 {cfg.label} 应用凭证</div>
           <p className="leading-relaxed">
             {configMissing.length > 0 && <>当前缺少：<code className="break-all">{configMissing.join('、')}</code>。</>}
-            这是平台级配置，由系统管理员在 Supabase 后台填写（详见 <code>supabase/functions/manual/README.md</code>）。
+            这是平台级配置，由系统管理员在 Supabase 后台填写（详见 <code>{cfg.docPath}</code>）。
             配置完成后本页会自动变为可连接状态。
           </p>
         </div>
       )}
       {fnStatus === 'ok' && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-[11.5px] text-emerald-800 flex items-center gap-1.5">
-          <CheckCircle2 className="w-3.5 h-3.5" />同步服务已就绪，可以连接店铺了。
+          <CheckCircle2 className="w-3.5 h-3.5" />{cfg.label} 同步服务已就绪，可以连接店铺了。
         </div>
       )}
 
       {/* 接入向导 */}
       <div className="card p-4">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="text-[13.5px] font-semibold text-ink-900">接入进度</h2>
+          <h2 className="text-[13.5px] font-semibold text-ink-900">{cfg.label} 接入进度</h2>
           <span className="text-[11px] text-ink-400">{completedSteps} / {steps.length} 步已完成</span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
@@ -378,9 +452,9 @@ export default function DataConnect() {
           <div className="flex items-center gap-2">
             <Link2 className="w-4 h-4 text-ink-400" />
             <h2 className="text-[13.5px] font-semibold text-ink-900">已连接店铺</h2>
-            <Badge tone="gray">{connections.filter((c) => c.status !== 'revoked').length}</Badge>
+            <Badge tone="gray">{platformConnections.filter((c) => c.status !== 'revoked').length}</Badge>
           </div>
-          {canManage && connections.length > 0 && (
+          {canManage && platformConnections.length > 0 && (
             <Button size="sm" variant="primary" loading={syncing === '__all__'} disabled={!serviceReady || syncing !== null} onClick={() => void runSync()}>
               同步全部
             </Button>
@@ -389,17 +463,17 @@ export default function DataConnect() {
         <div className="p-4">
           {loading ? (
             <div className="flex items-center gap-2 text-[11.5px] text-ink-400 py-4"><Loader2 className="w-3.5 h-3.5 animate-spin" />加载连接状态…</div>
-          ) : connections.length === 0 ? (
+          ) : platformConnections.length === 0 ? (
             <div className="rounded-lg border border-dashed border-ink-200 bg-ink-50/40 px-4 py-7 text-center">
               <PlugZap className="w-7 h-7 mx-auto text-ink-300 mb-2" />
-              <p className="text-[13px] font-medium text-ink-700">还没有连接任何店铺</p>
+              <p className="text-[13px] font-medium text-ink-700">还没有连接任何 {cfg.label} 店铺</p>
               <p className="text-[11.5px] text-ink-400 mt-1">连接后即可自动同步订单、商品与库存，无需手工导入</p>
             </div>
           ) : (
             <div className="space-y-2.5">
-              {connections.map((c) => {
+              {platformConnections.map((c) => {
                 const meta = STATUS_META[c.status] ?? STATUS_META.revoked
-                const storeRuns = runs.filter((r) => r.connection_id === c.id).slice(0, 3)
+                const storeRuns = platformRuns.filter((r) => r.connection_id === c.id).slice(0, 3)
                 return (
                   <div key={c.id} className="rounded-lg border border-ink-200 p-3.5">
                     <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -411,7 +485,7 @@ export default function DataConnect() {
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="text-[13px] font-medium text-ink-900">{c.store_name}</span>
                             <Badge tone={meta.tone} dot>{meta.label}</Badge>
-                            <span className="text-[10.5px] text-ink-400">{REGION_LABEL[c.region] ?? c.region}</span>
+                            <span className="text-[10.5px] text-ink-400">{regionLabel(c.region)}</span>
                           </div>
                           <div className="flex items-center gap-3 mt-1 text-[10.5px] text-ink-400 flex-wrap">
                             {c.last_sync_at ? (
@@ -464,7 +538,7 @@ export default function DataConnect() {
 
           {canManage && availableStores.length > 0 && (
             <div className="mt-4 pt-4 border-t border-ink-100">
-              <p className="text-[11.5px] font-medium text-ink-700 mb-2">可连接的 Amazon 店铺：</p>
+              <p className="text-[11.5px] font-medium text-ink-700 mb-2">可连接的 {cfg.label} 店铺：</p>
               <div className="flex flex-wrap gap-2">
                 {availableStores.map((s) => (
                   <Button
@@ -481,7 +555,7 @@ export default function DataConnect() {
                 ))}
               </div>
               <p className="text-[10.5px] text-ink-400 mt-2 inline-flex items-center gap-1">
-                <HelpCircle className="w-3 h-3" />点击后会跳转到 Amazon 官方授权页，在那里输入账号密码
+                <HelpCircle className="w-3 h-3" />点击后会跳转到 {cfg.authPage}，在那里输入账号密码
               </p>
             </div>
           )}
@@ -500,7 +574,7 @@ export default function DataConnect() {
           </Link>
         </div>
         <div className="p-4">
-          {runs.length === 0 ? (
+          {platformRuns.length === 0 ? (
             <p className="text-[11.5px] text-ink-400 py-3 text-center">暂无同步记录。连接店铺并首次同步后会显示在这里。</p>
           ) : (
             <div className="overflow-x-auto">
@@ -515,7 +589,7 @@ export default function DataConnect() {
                   </tr>
                 </thead>
                 <tbody>
-                  {runs.map((r) => {
+                  {platformRuns.map((r) => {
                     const rm = RUN_META[r.status] ?? RUN_META.skipped
                     return (
                       <tr key={r.id} className="border-b border-ink-50 last:border-0">
@@ -533,10 +607,10 @@ export default function DataConnect() {
                   })}
                 </tbody>
               </table>
-              {runs.some((r) => r.error) && (
+              {platformRuns.some((r) => r.error) && (
                 <div className="mt-3 rounded-md bg-rose-50 border border-rose-100 px-3 py-2 text-[10.5px] text-rose-700">
                   <p className="font-medium mb-1">失败记录（最近一条）：</p>
-                  <p className="break-all">{runs.find((r) => r.error)?.error}</p>
+                  <p className="break-all">{platformRuns.find((r) => r.error)?.error}</p>
                 </div>
               )}
             </div>
@@ -555,15 +629,15 @@ export default function DataConnect() {
             <div className="space-y-3 text-[12px] text-ink-600 leading-relaxed">
               <div>
                 <p className="font-medium text-ink-800 mb-1">1. 为什么要跳转授权，而不是填账号密码？</p>
-                <p>Amazon 明确禁止第三方系统收集卖家密码。走官方 OAuth 授权是唯一合规方式：您在 Amazon 官方页面登录并同意，系统只拿到一个加密存储的授权令牌，永远看不到密码。</p>
+                <p>各平台明确禁止第三方系统收集卖家密码。走官方 OAuth 授权是唯一合规方式：您在平台官方页面登录并同意，系统只拿到一个加密存储的授权令牌，永远看不到密码。</p>
               </div>
               <div>
                 <p className="font-medium text-ink-800 mb-1">2. 授权后同步哪些数据？多久一次？</p>
-                <p>同步订单、商品、FBA 库存（买家姓名电话地址等个人信息不落库）。默认每 30 分钟自动同步一次，也可以点「立即同步」手动触发。首次授权后会自动跑一次。</p>
+                <p>同步订单、商品、库存（买家姓名电话地址等个人信息不落库）。默认每 30 分钟自动同步一次，也可以点「立即同步」手动触发。首次授权后会自动跑一次。Amazon 与 TikTok Shop 分别连接、分别同步。</p>
               </div>
               <div>
                 <p className="font-medium text-ink-800 mb-1">3. 费用字段为什么是 0？</p>
-                <p>订单的佣金、FBA 费、广告费等暂时留空，避免算错利润。您手工填写的成本和费用不会被同步覆盖。后续接入财务接口再精确回填。</p>
+                <p>订单的佣金、平台费、广告费等暂时留空，避免算错利润。您手工填写的成本和费用不会被同步覆盖。后续接入财务接口再精确回填。</p>
               </div>
               <div>
                 <p className="font-medium text-ink-800 mb-1">4. 店铺挂在谁名下？</p>
@@ -583,7 +657,7 @@ export default function DataConnect() {
 
       <ConfirmDialog
         open={!!disconnectTarget}
-        title="解除 Amazon 店铺授权"
+        title={`解除 ${cfg.label} 店铺授权`}
         message="解除后将停止自动同步并清除授权令牌。已同步的订单、商品、库存数据会保留（属于财务凭证）。确认继续？"
         confirmText="确认解除"
         onClose={() => setDisconnectTarget(null)}
