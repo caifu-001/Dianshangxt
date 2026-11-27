@@ -132,7 +132,7 @@ function employmentOf(p: Profile): EmploymentStatus {
 }
 
 export default function Accounts() {
-  const { user, profile: me, role, isSuperAdmin, currentCompanyId, can } = useAuth()
+  const { user, profile: me, role, currentCompanyId, can } = useAuth()
   const { push } = useToast()
   const canAdmin = can('account.manage')
   const canHr = can('hr.manage')
@@ -816,7 +816,7 @@ export default function Accounts() {
                                       </button>
                                     </>
                                   )}
-                                  {isSuperAdmin && operable && (
+                                  {operable && (
                                     <button
                                       className="p-1.5 rounded-md text-ink-400 hover:text-rose-600 hover:bg-rose-50"
                                       title="移除档案"

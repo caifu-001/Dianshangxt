@@ -562,7 +562,7 @@ export default function AccessFlow() {
             <div className="rounded-lg border border-ink-200 bg-ink-50/60 px-3 py-2">
               <p className="text-[11.5px] leading-relaxed text-ink-600">
                 这里申请的是<b className="text-ink-800">岗位角色</b>（能看到哪些业务模块）。
-                「普通管理员」这类系统角色只能由超级管理员在「人员与账号」里直接调整。
+                「普通管理员」这类系统角色由公司管理员在「人员与账号」里直接调整。
               </p>
             </div>
           )}

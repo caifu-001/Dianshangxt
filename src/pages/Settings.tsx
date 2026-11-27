@@ -107,7 +107,7 @@ export default function Settings() {
   const [clearOpen, setClearOpen] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [counts, setCounts] = useState<Record<string, number>>({})
-  // 演示数据清理（仅超管）
+  // 演示数据清理（公司管理员可清理本公司）
   const [demoOpen, setDemoOpen] = useState(false)
   const [demoStats, setDemoStats] = useState<DemoStat[]>([])
   const [demoLoading, setDemoLoading] = useState(false)
@@ -814,12 +814,12 @@ export default function Settings() {
             </Button>
           </div>
 
-          {isSuperAdmin && (
+          {canManageSystem && (
             <div className="p-4 flex flex-wrap items-center gap-3">
               <div className="min-w-0 flex-1">
                 <p className="text-[13px] font-medium text-ink-800">清理演示数据</p>
                 <p className="mt-0.5 text-[11.5px] text-ink-500 leading-relaxed">
-                  仅删除「生成演示数据」产生的记录，按固定店铺 / SKU / 编号特征识别，不影响真实录入的数据。按当前管理视角公司清理。
+                  仅删除「生成演示数据」产生的记录，按固定店铺 / SKU / 编号特征识别，不影响真实录入的数据。只清理当前公司的演示数据。
                 </p>
               </div>
               <Button size="sm" variant="danger" onClick={openDemoPurge} icon={<Eraser className="w-3.5 h-3.5" />}>

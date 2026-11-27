@@ -1667,8 +1667,8 @@ declare
   v_company uuid := public.current_company_id();
   v_stores  uuid[] := public.demo_store_ids();
 begin
-  if not public.is_super_admin() then
-    raise exception '只有平台超级管理员可以查看演示数据统计';
+  if not (public.is_super_admin() or public.has_permission('system.manage')) then
+    raise exception '只有管理员可以查看演示数据统计';
   end if;
 
   return query select * from (values
@@ -1704,8 +1704,8 @@ declare
   v_result  jsonb := '{}'::jsonb;
   v_n       bigint;
 begin
-  if not public.is_super_admin() then
-    raise exception '只有平台超级管理员可以清理演示数据';
+  if not (public.is_super_admin() or public.has_permission('system.manage')) then
+    raise exception '只有管理员可以清理演示数据';
   end if;
   if p_confirm is distinct from 'PURGE DEMO' then
     raise exception '清理演示数据需要显式确认';
@@ -2415,10 +2415,17 @@ create policy "profiles_update_hr" on public.profiles
   using (public.has_permission('hr.manage') and public.in_company(company_id))
   with check (public.has_permission('hr.manage') and public.in_company(company_id));
 
--- 仅超级管理员可移除档案，且不能移除自己
-create policy "profiles_delete_super" on public.profiles
+-- 公司管理员可移除本公司成员档案（本公司最高权限），超管可移除当前视角公司的档案。
+-- 都不能移除自己；平台超管账号受 email 条件保护，任何管理员都删不掉。
+drop policy if exists "profiles_delete_super" on public.profiles;
+create policy "profiles_delete_staff" on public.profiles
   for delete to authenticated
-  using (public.is_super_admin() and public.in_company(company_id) and id <> auth.uid());
+  using (
+    public.in_company(company_id)
+    and id <> auth.uid()
+    and lower(coalesce(email, '')) <> 'yinsuccess168@163.com'
+    and (public.is_super_admin() or public.has_permission('account.manage'))
+  );
 
 -- ---------- 业务表 ----------
 -- 读：{模块}.view / 写：{模块}.edit / 删：data.delete
@@ -2574,10 +2581,13 @@ drop policy if exists "access_req_insert"      on public.access_requests;
 drop policy if exists "access_req_update_own"  on public.access_requests;
 drop policy if exists "access_req_update_staff" on public.access_requests;
 
--- 本人看自己的申请；管账号的人看全部（审批列表）
+-- 本人看自己的申请；管账号的人只看本公司的申请（审批列表），避免跨租户信息泄露
 create policy "access_req_select" on public.access_requests
   for select to authenticated
-  using (user_id = auth.uid() or public.has_permission('account.manage'));
+  using (
+    user_id = auth.uid()
+    or (public.has_permission('account.manage') and public.in_company(company_id))
+  );
 
 -- 只能给自己申请，且新建一律 pending：
 -- 否则可以伪造一条 approved 记录冒充审批结果
@@ -2593,8 +2603,8 @@ create policy "access_req_update_own" on public.access_requests
 
 create policy "access_req_update_staff" on public.access_requests
   for update to authenticated
-  using (public.has_permission('account.manage'))
-  with check (public.has_permission('account.manage'));
+  using (public.has_permission('account.manage') and public.in_company(company_id))
+  with check (public.has_permission('account.manage') and public.in_company(company_id));
 
 -- ---------- 人员变动流水（employee_events） ----------
 drop policy if exists "emp_events_select" on public.employee_events;
@@ -2814,9 +2824,9 @@ begin
   if t.role = 'super_admin' then
     raise exception '超级管理员不能直接办理离职，请先把超管权限交给其他账号';
   end if;
-  if t.role = 'admin' and not public.is_super_admin() then
-    raise exception '只有超级管理员可以办理管理员的离职';
-  end if;
+  -- 本公司范围内，管理员可办理本公司任意角色的离职（含其他管理员）。
+  -- assert_row_company 已确保目标属于调用者公司，不存在跨租户操作；
+  -- 超管账号本身不可离职，上面已单独拦截。
   if p_handover = p_target then
     raise exception '交接人不能是离职人自己';
   end if;
@@ -2888,8 +2898,10 @@ begin
 
   if p_approve then
     if r.target_role is not null then
-      if r.target_role = 'admin' and not public.is_super_admin() then
-        raise exception '只有超级管理员可以授予管理员';
+      -- 本公司最高角色为普通管理员，公司管理员可在本公司内授予/回收 admin。
+      -- assert_row_company 已确保申请属于本公司；超管账号上面已单独拦截。
+      if r.target_role not in ('admin', 'member') then
+        raise exception '只能授予管理员或普通人员';
       end if;
       update public.profiles set role = r.target_role where id = r.user_id;
     end if;
