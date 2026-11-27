@@ -326,6 +326,21 @@ export default function Expenses() {
     return `${prefix}${String(seq).padStart(4, '0')}`
   }
 
+  /**
+   * 分配全局唯一单号。code 是数据库全局 unique，而 RLS 让用户只能看到本公司单据，
+   * 前端本地算号在多租户下必然撞号（409）。优先用数据库的原子函数跨公司取号；
+   * 函数未部署时回退到本地号 + 随机后缀，保证即使没执行 SQL 也不会撞号。
+   */
+  async function allocateCode(): Promise<string> {
+    try {
+      const code = await callRpc<string>('next_expense_code')
+      if (typeof code === 'string' && code.trim()) return code
+    } catch {
+      // 函数尚未部署，走本地兜底
+    }
+    return `${genCode()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`
+  }
+
   /** 从业务来源记录带入费用信息 */
   function applySource(base: ExpenseForm, module: ExpenseSourceModule, sourceId: string): ExpenseForm {
     // 未选具体记录时只切换模块，保持已填内容不变
@@ -433,8 +448,23 @@ export default function Expenses() {
         // 重写明细：先删再插，由触发器汇总回主表金额
         await deleteWhere('finance_expense_items', 'expense_id', id)
       } else {
-        const row = await insertRows<{ id: string }>('finance_expenses', [{ ...payload, code: form.code, status: 'draft' }])
-        id = row[0].id
+        // 单号全局唯一且 RLS 按公司隔离，前端算号会撞号；用数据库原子分配 + 409 换号重试
+        let lastErr: unknown
+        let created = false
+        for (let attempt = 0; attempt < 4 && !created; attempt++) {
+          const code = await allocateCode()
+          try {
+            const row = await insertRows<{ id: string }>('finance_expenses', [{ ...payload, code, status: 'draft' }])
+            id = row[0].id
+            created = true
+          } catch (err) {
+            lastErr = err
+            const msg = err instanceof Error ? err.message : String(err)
+            // 只有单号/唯一键冲突才换号重试，其它错误（权限、字段等）直接抛出
+            if (!/已存在|重复|duplicate key|unique constraint/i.test(msg)) throw err
+          }
+        }
+        if (!created) throw lastErr ?? new Error('创建费用单失败，请重试')
       }
       await insertRows('finance_expense_items', form.items.map((it) => ({
         expense_id: id,
@@ -1030,7 +1060,7 @@ export default function Expenses() {
               )}
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <Field label="单号"><input className="input" value={form.code} disabled /></Field>
+              <Field label="单号"><input className="input" value={form.id ? form.code : '保存时自动生成'} disabled /></Field>
               <Field label="费用事由" required><input className="input" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="如：11 月美国站广告充值" /></Field>
             </div>
             <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">

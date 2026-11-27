@@ -439,6 +439,8 @@ draft 草稿 → submit_expense 提交 → pending 待审核
 - 权限：`expense.view` / `expense.edit` 控制记账与查看，财务审核复用 `finance.audit`
   （财务部默认三者全有，其余部门默认可记账但不可审核；内置角色财务核算 / 财务审核员带费用权限）
 - 数据表：`finance_expenses`、`finance_expense_items`、`finance_budgets`、`finance_expense_approvals`
+- 单号 `FY年月-序号` 为**全局唯一**，由数据库函数 `next_expense_code()` 原子分配（避免多租户按公司本地算号撞号报 409）。
+  首次使用请在 Supabase SQL Editor 执行 `supabase/expense_code_fix.sql`（幂等）；未执行时前端会用「本地号 + 随机后缀」兜底，仍可正常建单。
 
 ### 业务费用数据互通（广告 / 达人 / 站外品牌 / 产品开发）
 
