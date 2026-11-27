@@ -1268,6 +1268,14 @@ language plpgsql security definer set search_path = public
 as $$
 begin
   if new.company_id is null then
+    -- 权限申请：平台超管提交的申请是平台级记录，不归属任何公司。
+    -- 若按 current_company_id() 填成超管「当前视角公司」，那家公司的管理员
+    -- 就会看到超管的申请（显示为「未知成员」），造成跨角色信息泄露。
+    -- 保持 NULL，只有超管自己可见；普通成员仍按本公司归属。
+    if TG_TABLE_NAME = 'access_requests'
+       and (select role from public.profiles where id = auth.uid()) = 'super_admin' then
+      return new;
+    end if;
     new.company_id := public.current_company_id();
   end if;
   return new;
@@ -2591,8 +2599,12 @@ create policy "access_req_select" on public.access_requests
     or (
       public.has_permission('account.manage')
       -- 平台超管是全局最高权限：不受「当前管理视角」约束，可看所有公司的权限申请。
-      -- 公司管理员没有超管角色，仍被 in_company 限制在本公司范围内。
-      and (public.is_super_admin() or public.in_company(company_id))
+      -- 公司管理员没有超管角色，仍被 in_company 限制在本公司范围内；
+      -- 且 company_id 为 NULL 的平台级申请（如超管提交）任何公司管理员都看不到。
+      and (
+        public.is_super_admin()
+        or (company_id is not null and public.in_company(company_id))
+      )
     )
   );
 
@@ -2612,11 +2624,17 @@ create policy "access_req_update_staff" on public.access_requests
   for update to authenticated
   using (
     public.has_permission('account.manage')
-    and (public.is_super_admin() or public.in_company(company_id))
+    and (
+      public.is_super_admin()
+      or (company_id is not null and public.in_company(company_id))
+    )
   )
   with check (
     public.has_permission('account.manage')
-    and (public.is_super_admin() or public.in_company(company_id))
+    and (
+      public.is_super_admin()
+      or (company_id is not null and public.in_company(company_id))
+    )
   );
 
 -- ---------- 人员变动流水（employee_events） ----------

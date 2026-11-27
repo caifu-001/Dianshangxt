@@ -12,6 +12,8 @@
 --   6. 人员变动记录：超管可见所有公司（原先被 in_company 收敛到默认公司，导致看不到全量）
 --   7. 成员档案：超管可见所有公司（否则权限流程页姓名显示「未知成员」）
 --      另：前端隐藏超管账号的「申请权限」按钮（超管已拥有全部权限，无需申请）
+--   8. 隔离修复：超管提交的权限申请 company_id 保持 NULL（平台级），
+--      不再被当成「当前视角公司」的记录而让那家公司管理员看到；存量数据一并修正。
 --
 --  仍保留超管专属（平台级，不下放）：
 --   创建/维护公司、审核公司入驻、跨公司调人、切换管理视角、
@@ -350,9 +352,39 @@ create policy "profiles_delete_staff" on public.profiles
     and (public.is_super_admin() or public.has_permission('account.manage'))
   );
 
+-- ---------- 5.5 超管提交的权限申请不再打「当前视角公司」标签 ----------
+-- 根因：set_company_id 触发器对超管也按 current_company_id() 填公司，
+-- 导致超管的申请带上了视角公司标签，那家公司的管理员就能看到（显示为「未知成员」）。
+-- 修复：access_requests 表上，超管提交的记录 company_id 保持 NULL（平台级），
+-- 任何公司管理员都看不到，只有超管自己可见；普通成员仍按本公司归属。
+create or replace function public.set_company_id()
+returns trigger
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if new.company_id is null then
+    if TG_TABLE_NAME = 'access_requests'
+       and (select role from public.profiles where id = auth.uid()) = 'super_admin' then
+      return new;
+    end if;
+    new.company_id := public.current_company_id();
+  end if;
+  return new;
+end;
+$$;
+
+-- 存量数据修正：把「申请人是超管」但被错误打上公司标签的申请改回 NULL。
+-- 这样历史记录也会立即从公司管理员的列表里消失。
+update public.access_requests ar
+   set company_id = null
+  from public.profiles p
+ where ar.user_id = p.id
+   and p.role = 'super_admin';
+
 -- ---------- 6. 权限申请列表/审批：补租户过滤，但保留超管跨公司能力 ----------
 -- 公司管理员：只能看/批本公司的申请（杜绝跨公司泄露）
 -- 平台超管：全局最高权限，不受「当前管理视角」约束，可看/批所有公司的申请
+-- company_id 为 NULL 的平台级申请（超管提交）：任何公司管理员都看不到。
 drop policy if exists "access_req_select" on public.access_requests;
 create policy "access_req_select" on public.access_requests
   for select to authenticated
@@ -360,7 +392,10 @@ create policy "access_req_select" on public.access_requests
     user_id = auth.uid()
     or (
       public.has_permission('account.manage')
-      and (public.is_super_admin() or public.in_company(company_id))
+      and (
+        public.is_super_admin()
+        or (company_id is not null and public.in_company(company_id))
+      )
     )
   );
 
@@ -369,11 +404,17 @@ create policy "access_req_update_staff" on public.access_requests
   for update to authenticated
   using (
     public.has_permission('account.manage')
-    and (public.is_super_admin() or public.in_company(company_id))
+    and (
+      public.is_super_admin()
+      or (company_id is not null and public.in_company(company_id))
+    )
   )
   with check (
     public.has_permission('account.manage')
-    and (public.is_super_admin() or public.in_company(company_id))
+    and (
+      public.is_super_admin()
+      or (company_id is not null and public.in_company(company_id))
+    )
   );
 
 -- ---------- 7. 人员变动记录：超管可见所有公司，公司管理员仍限本公司 ----------
