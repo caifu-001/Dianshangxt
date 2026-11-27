@@ -8,11 +8,10 @@
 
 Supabase 控制台 → 左侧 **Project Settings → Edge Functions → Secrets**（或 Functions → Secrets），逐个 Add new secret：
 
+> ⚠️ **`SUPABASE_` 开头的不要手动创建**——Supabase 会自动注入 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`，手动添加会报 `Name must not start with the SUPABASE_ prefix`。代码里直接读这三个环境变量即可，无需任何操作。GitHub Actions 那边的同名 secret 是仓库变量，不在这个页面填，两者互不影响。
+
 | Secret 名 | 值 | 说明 |
 |---|---|---|
-| `SUPABASE_URL` | `https://rjdoimnicmibxfwcjchn.supabase.co` | 项目地址 |
-| `SUPABASE_SERVICE_ROLE_KEY` | 项目 `service_role` key | **只在服务端填，绝不进前端** |
-| `SUPABASE_ANON_KEY` | 项目 anon/publishable key | 用于校验调用者身份 |
 | `AMAZON_LWA_CLIENT_ID` | 待申请 | Login with Amazon 应用 Client ID |
 | `AMAZON_LWA_CLIENT_SECRET` | 待申请 | Client Secret |
 | `AMAZON_REDIRECT_URI` | 部署 callback 后回填 | 形如 `https://<project>.supabase.co/functions/v1/amazon-oauth-callback` |
