@@ -1549,6 +1549,9 @@ end;
 $$;
 
 -- 读系统日志：只有平台超管能拿到任何行，其余账号查不到（security definer 绕过 RLS 后自行校验）
+-- 兼容旧库：此函数曾为 4 参数（无 p_company），create or replace 会留下旧重载，
+-- 前端按 5 参数调用时可能解析到旧签名导致字段缺失，先删掉旧重载。
+drop function if exists public.list_system_logs(integer, text, text, text);
 create or replace function public.list_system_logs(
   p_limit   integer default 100,
   p_category text default null,
@@ -1883,6 +1886,9 @@ $$;
 -- 当前用户所属公司（只读）：普通账号 = 所属公司，平台超管 = 当前管理视角公司。
 -- companies 是平台级表、普通账号受 RLS 不可直读，这里用 security definer 只放行自己这一行，
 -- 且不暴露其它公司；pending / disabled 账号由 is_active_user() 挡住。
+-- 兼容旧库：曾给返回列追加 settings jsonb，Postgres 不允许 create or replace 改返回类型（42P13），
+-- 必须先 DROP 再重建；依赖此函数的 grants 在脚本末尾统一重新授予。
+drop function if exists public.my_company();
 create or replace function public.my_company()
 returns table (
   id uuid, name text, code text, status text, note text,
@@ -3638,6 +3644,8 @@ end;
 $$;
 
 -- ---------- 一键把缺货建议生成采购单（订单驱动补货） ----------
+-- 兼容旧库：曾追加 p_warehouse 参数，先删 4 参数旧重载，避免调用解析到旧签名
+drop function if exists public.create_po_from_shortage(jsonb, uuid, uuid, uuid);
 create or replace function public.create_po_from_shortage(
   p_lines       jsonb,                -- [{sku,title,product_id,qty,unit_cost}]
   p_supplier_id uuid default null,
