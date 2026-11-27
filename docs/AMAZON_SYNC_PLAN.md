@@ -48,14 +48,22 @@
 |---|---|---|
 | 专业卖家账号 | Amazon 要求 Professional 账号才能创建开发者资料。个人账号需先升级（$39.99/月） | 即时 |
 | 开发者资料 | Seller Central → Apps and Services → Develop Apps → Create Developer Profile | — |
-| **私有应用（Private seller）** | 只服务自己公司、自授权、无需公开审计 | **3–7 天** |
-| 公共应用（Public seller） | 服务多家公司、需官网 HTTPS + 隐私政策 + 安全问卷（PwC/ISG） | 20–60 天 |
+| **公共应用（Public seller）✅ 选定路线** | 服务多家公司，各公司 OAuth 授权自己的店铺；需官网 HTTPS + 隐私政策 + 安全问卷（PwC/ISG） | **20–60 天** |
+| 私有应用（Private seller） | 只服务自己公司、自授权、无需公开审计；仅用于内部技术验证，不可对外开放 | 3–7 天 |
 | AWS IAM 用户 | 建 IAM User，策略 `AmazonSellingPartnerAPI...`（execute-api:Invoke），拿 Access Key / Secret / Role ARN | 即时 |
 | LWA 应用 | 在 Developer Central 创建 app client，拿 Client ID / Secret，配置 OAuth 重定向 URI | 即时 |
+| Solution Provider Portal (SPP) | 法人身份验证（2026 起含人脸识别），公司资质须与执照/地址完全一致 | 1–3 天 |
 
-**第一阶段建议：私有应用（Private seller）**。因为本系统是多租户，但第一版只接你自己的店铺；先把闭环跑通，再评估是否申请公共应用开放给所有入驻公司。私有应用授权卖家上限 25 个，足够内部验证。
+**已定：开放给所有公司 → 必须走公共应用（Public seller）**。私有应用只能服务自己公司，不能满足需求。
 
-⚠️ 私有应用只能给自己公司用。若后续要让各入驻公司授权自己的店铺，必须转公共应用（走审计）。
+公共应用审计要点（2026 年现状）：
+- **SPP 注册 + 身份验证** → 创建开发者资料 → 选择应用类型 Public seller → 提交用途说明（必须具体到业务流程，禁止「数据分析」这类模糊描述）。
+- **PwC 安全问卷**：108 个问题，两次视频会议（约 20 天），覆盖数据加密、IAM 密钥管理、访问控制、日志审计；答案须与架构文档完全一致。
+- **亚马逊 ISG 人工评估**：审系统架构、数据流、安全控制文档，验证 PII 处理合规（7–30 天）。
+- 要求：HTTPS 官网、完整隐私政策、数据删除机制（响应 GDPR/删除请求）、TLS 1.3 传输加密、存储加密、日志保留 ≥365 天、应急响应流程。PII 权限非必要不申请——本方案不落库 PII，正好契合。
+- 应用未发布时授权卖家上限 25 个，发布后解除限制。
+
+⚠️ **审计周期是硬门槛（20–60 天）且不可压缩**。技术与审计可并行：先按本文档把系统开发完、用自己的店铺（私有应用或沙箱）跑通闭环，同时准备审计材料；审批通过后切到公共应用凭证即可对外开放。
 
 ---
 
@@ -151,6 +159,16 @@ create policy sync_runs_select on public.sync_runs
 6. **首次同步**：异步触发一次全量/近 90 天同步
 
 刷新令牌长期有效（除非用户取消授权）；访问令牌 1 小时过期，每次调用前用 refresh token 换新。
+
+### 4.1 多租户授权要点（开放给所有公司）
+
+- **谁发起**：只有该公司 `admin`（或 `system.manage` 权限）能连接/解除店铺，普通成员只读。防止成员把自己的店铺挂到公司下。
+- **state 绑定公司**：`oauth_states` 表存 `company_id / store_id / caller_id / state`，回调时三者都校验；`company_id` 从服务端会话取，不信任前端传参。
+- **一店一连接**：`platform_connections` 唯一键 `(company_id, store_id, platform)`，同一店铺重复授权走更新，不产生第二条。
+- **授权凭证归属**：`refresh_token` 加密存且带 `company_id`，Edge Function 每次同步先按 `company_id` 取出，绝不跨公司复用。
+- **取消授权**：用户在 Seller Central 撤销授权后，同步会拿到 400 `invalid_grant`；函数自动把连接标记 `status=error`、记日志，前端提示「请重新授权」，不影响其他公司。
+- **掉线告警**：连续 3 次同步失败写一条 `warning` 级系统日志，公司管理员可见。
+- **解除绑定**：`amazon-disconnect` 清 token 但**保留已同步的业务数据**（订单/商品是财务凭证），需二次确认。
 
 ---
 
@@ -298,8 +316,9 @@ for each active connection:
 - **密钥管理**：LWA Client Secret、AWS Access Key、加密密钥放 Supabase Edge Function Secrets / Vault，不进 git。
 - **Token 加密**：`refresh_token` 用 pgcrypto 对称加密存储，解密只在 Edge Function 内存中进行。
 - **权限最小化**：SP-API scope 只申请 `readorders / readcatalog / readinventory / readfinancials`，不申请写权限（第一阶段纯只读）。
-- **隐私政策**：公共应用阶段必须有 HTTPS 官网 + 隐私政策 + 数据删除机制；第一阶段私有应用可豁免。
-- **审计**：每次同步写 `sync_runs` + `system_logs`，包含请求 ID、行数、耗时。
+- **隐私政策**：公共应用强制要求——HTTPS 官网（`kuahaishidai.dpdns.org` 已具备）+ 完整隐私政策页 + 数据删除机制（用户可请求删除其授权数据）+ 有效联系方式。这三项要在提交审计前就位。
+- **审计日志**：每次同步写 `sync_runs` + `system_logs`，包含请求 ID、行数、耗时；审计要求日志保留 ≥365 天，现有「超管清理日志」功能需排除同步审计类记录。
+- **数据删除**：提供「解除授权并删除该公司同步数据」的受控入口（订单/商品属财务凭证，默认保留，仅删除 token 与同步日志；如用户依据 GDPR 要求彻底删除，走超管二次确认）。
 
 ---
 
@@ -319,13 +338,15 @@ for each active connection:
 
 | 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| **P0 准备** | 专业卖家账号、开发者资料、私有应用、AWS IAM、LWA app | 拿到 Client ID/Secret、AWS Key、Role ARN |
-| **P1 授权** | `platform_connections` 表 + oauth-start/callback 两个函数 | 点连接能完成授权，token 加密落库，前端显示已连接 |
+| **P0 资质（并行启动，最长 60 天）** | SPP 注册+身份验证、专业卖家账号、开发者资料、**公共应用**申请、AWS IAM、LWA app、官网隐私政策/联系方式/数据删除说明 | 拿到公共应用 Client ID/Secret、AWS Key、Role ARN，通过 PwC + ISG 审计 |
+| **P1 授权** | `platform_connections` + `oauth_states` 表、oauth-start/callback/disconnect 三个函数、公司管理员权限校验 | 用自己的店铺能完成授权，token 加密落库，普通成员只读，前端显示已连接 |
 | **P2 订单同步** | amazon-sync 订单分支 + 字段映射 + 幂等 | 近 90 天订单同步进 `orders`，重复跑不产生重复单 |
 | **P3 商品/库存** | catalog 与 FBA inventory 分支 | `products` / `inventory` 与后台一致 |
-| **P4 调度与可观测** | cron + 手动同步 + sync_runs + 日志 | 定时自动跑，失败有日志和告警 |
+| **P4 调度与可观测** | cron + 手动同步 + sync_runs + 日志 + 掉线告警 | 定时自动跑，失败有日志和告警，多公司互不干扰 |
 | **P5 财务（可选）** | Financial Events 回填费用 | 佣金/FBA/退款回填正确，利润可追溯 |
-| **P6 公共应用（可选）** | 官网、隐私政策、安全问卷、审计 | 各入驻公司可独立授权自己的店铺 |
+| **P6 对外开放** | 审计通过后切公共应用凭证，各公司自助授权 | 不同公司能独立授权自己的店铺，数据严格隔离 |
+
+> 时间线建议：**P0 与 P1–P4 并行**。审计 20–60 天期间完成开发并用自有店铺（私有应用凭证）跑通，审计通过后只换凭证、不改代码即可开放。
 
 ---
 
@@ -333,8 +354,10 @@ for each active connection:
 
 | 风险 | 应对 |
 |---|---|
-| 私有应用不能服务多家公司 | 第一阶段只接自有店铺；多公司需走公共应用审计 |
-| PII 审核严格 | 第一阶段不取任何 PII |
+| **公共应用审计周期长（20–60 天）** | 立即启动 P0 资质准备，与 P1–P4 开发并行；期间用私有应用跑通技术闭环 |
+| **公共应用审计被驳回** | 用途描述写具体业务流程；官网 HTTPS + 隐私政策 + 数据删除机制提前就位；安全问卷答案与架构文档一致；不申请 PII 权限 |
+| PII 审核严格 | 不取任何 PII，只保留国家码 |
+| 多公司授权串号 | state 绑定服务端 `company_id`，token 按公司加密隔离，同步按公司校验 |
 | 一单多 SKU 唯一键冲突 | 按行拆单 + 序号后缀 |
 | 费用字段写错污染利润 | 费用留空，第二阶段用 Financial Events 精确回填 |
 | Amazon 限流 / schema 变更 | 限流退避 + 请求 ID 日志 + 定期查看 SP-API Release Notes |
@@ -345,8 +368,10 @@ for each active connection:
 
 ## 13. 待确认事项
 
-1. 是否已有 **Amazon 专业卖家账号**？若无，需先注册（$39.99/月）。
-2. 第一阶段只接**你自己的店铺**，还是要开放给所有入驻公司？（决定私有 / 公共应用路线）
-3. 主要站点/区域：北美（na）、欧洲（eu）还是日本（fe）？决定 API 端点。
-4. 是否需要广告数据（`campaigns`）也自动同步？这要额外接 Ads API。
-5. 一单多 SKU：按行拆单是否可接受？
+1. 是否已有 **Amazon 专业卖家账号**？若无，需先注册（$39.99/月）——公共应用申请以它为前提。
+2. 主要站点/区域：北美（na）、欧洲（eu）还是日本（fe）？决定 API 端点（可先支持 na，再扩 eu/fe）。
+3. 是否需要广告数据（`campaigns`）也自动同步？这要额外接 Ads API 并单独申请 scope。
+4. 一单多 SKU：按行拆单（订单号加 `-1/-2` 后缀）是否可接受？
+5. 官网是否就用 `kuahaishidai.dpdns.org` 承接隐私政策 / 联系方式 / 数据删除说明？（审计需要，建议是）
+
+> 已确认：开放给所有公司 → 公共应用路线（见第 2、4.1 节）。
