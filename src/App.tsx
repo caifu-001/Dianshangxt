@@ -235,9 +235,9 @@ function AppRoutes() {
   )
 }
 
-// GitHub Pages 部署在 /Dianshangxt/ 子路径下，BrowserRouter 需要知道这段前缀，
+// 自定义域名 kuahaishidai.dpdns.org 部署在根路径，BrowserRouter 需与 BASE_URL 保持一致，
 // 否则所有路由都匹配不到，刷新后会掉回登录页。
-// 本地开发时 BASE_URL 为 '/'，去掉尾部斜杠后回退为 '/'。
+// BASE_URL 由 vite.config.ts 的 base 决定，去掉尾部斜杠后回退为 '/'。
 const BASENAME = import.meta.env.BASE_URL.replace(/\/+$/, '') || '/'
 
 export default function App() {

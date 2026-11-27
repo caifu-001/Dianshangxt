@@ -4,7 +4,9 @@
 
 > 技术栈：React 18 + TypeScript + Vite + TailwindCSS + Recharts + Supabase (PostgreSQL)
 
-**🌐 线上地址：<https://caifu-001.github.io/Dianshangxt/>**
+**🌐 线上地址：<https://kuahaishidai.dpdns.org/>**
+
+（旧地址 <https://caifu-001.github.io/Dianshangxt/> 仍可访问）
 
 前端由 GitHub Pages 托管（push `main` 自动构建发布），数据存放在 Supabase 云端。
 首次使用前，需要在该 Supabase 项目的 SQL Editor 执行一次 `supabase/schema.sql` 建表。
@@ -340,6 +342,7 @@ Supabase 内置邮件服务**每小时仅 2 封，且只能发给项目成员**�
 `Authentication` → `URL Configuration` → `Redirect URLs`，加入：
 
 ```
+https://kuahaishidai.dpdns.org/
 https://caifu-001.github.io/Dianshangxt/
 http://127.0.0.1:5173/
 ```
@@ -599,12 +602,15 @@ npm run preview    # 预览构建产物
 
 ## 部署
 
-当前线上版本跑在 **GitHub Pages**：<https://caifu-001.github.io/Dianshangxt/>
+当前线上版本跑在 **GitHub Pages**：<https://kuahaishidai.dpdns.org/>
 
 - 推送 `main` 触发 `.github/workflows/deploy.yml`：`npm install` → 类型检查 → 构建 → 发布
-- 构建产物的资源前缀由 `vite.config.ts` 的 `base` 控制，生产模式固定为 `/Dianshangxt/`
+- 已绑定自定义域名 `kuahaishidai.dpdns.org`（DigitalPlat 免费域名，4 条 A 记录指向 GitHub Pages）
+  - 仓库 `public/CNAME` 保存域名，构建时自动复制到 `dist/CNAME`，GitHub Pages 据此识别自定义域名
+  - GitHub 仓库 Settings → Pages → Custom domain 也要填 `kuahaishidai.dpdns.org` 并勾选 Enforce HTTPS
+- 构建产物的资源前缀由 `vite.config.ts` 的 `base` 控制，当前为根路径 `/`
+  - 若改回 `github.io` 子路径访问，在仓库环境变量（或 `.env`）里设 `VITE_BASE_PATH=/Dianshangxt/`
 - 构建后自动把 `index.html` 复制成 `404.html`，用于兜住 SPA 子路由刷新（Pages 无服务端 rewrite）
-- 仓库改名或绑定自定义域名时，在 `.env` 里设置 `VITE_BASE_PATH=/` 即可（此时 basename 也会自动变）
 
 也可以部署到 Vercel / Netlify / Cloudflare Pages 等任意静态托管，
 此时把 `VITE_BASE_PATH` 设为 `/`，并配置 history fallback（所有路径回退到 `index.html`）。
