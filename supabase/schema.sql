@@ -3412,8 +3412,9 @@ begin
          approval_note = nullif(btrim(coalesce(p_note, '')), ''),
          updated_at = now()
    where id = ex.id;
+  -- action 是流水动作枚举（approve/reject），不是费用单状态枚举（approved/rejected）
   insert into public.finance_expense_approvals (user_id, expense_id, action, note)
-  values (auth.uid(), ex.id, p_decision, p_note);
+  values (auth.uid(), ex.id, case when p_decision = 'approved' then 'approve' else 'reject' end, p_note);
   return jsonb_build_object('ok', true, 'status', p_decision);
 end;
 $$;
